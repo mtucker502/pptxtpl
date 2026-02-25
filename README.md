@@ -8,6 +8,8 @@ Jinja2 templating for PowerPoint `.pptx` files. Like [docxtpl](https://github.co
 - [RichText](#richtext)
 - [Slide loops](#slide-loops)
 - [Conditional slides](#conditional-slides)
+- [Table row loops](#table-row-loops)
+- [Table cell conditionals](#table-cell-conditionals)
 - [Inspecting templates](#inspecting-templates)
 
 ## Install
@@ -190,6 +192,60 @@ The condition is any valid Jinja2 expression:
 ```
 
 Conditional slides are evaluated before slide loops, so a `{%slide if %}` can gate a section without needing the loop's iterable to exist when the condition is false.
+
+## Table row loops
+
+Use `{%tr for %}` to duplicate a table row for each item in a list. Place the opening tag in the first cell and the closing tag in the last cell of the row you want to repeat.
+
+**In the template** (a table with a header row and one template row):
+
+| Metric | Value | Status |
+|---|---|---|
+| `{%tr for m in metrics %}{{ m.name }}` | `{{ m.value }}` | `{{ m.status }}{%tr endfor %}` |
+
+**Render:**
+
+```python
+tpl = PptxTemplate("template.pptx")
+tpl.render({
+    "metrics": [
+        {"name": "Revenue", "value": "$4.2M", "status": "On track"},
+        {"name": "NPS", "value": "72", "status": "Above target"},
+        {"name": "Churn", "value": "3.1%", "status": "At risk"},
+    ],
+})
+tpl.save("output.pptx")
+# → Table has 4 rows: 1 header + 3 data rows
+```
+
+The `{%tr %}` prefix elevates the Jinja tag to the `<a:tr>` (table row) XML level, so the loop wraps the entire row element.
+
+Conditionals work the same way — `{%tr if condition %}...{%tr endif %}` to include or exclude a row.
+
+## Table cell conditionals
+
+Use `{%tc if %}` to conditionally include or exclude individual table cells. Place the opening tag in one cell and the closing tag in another — both cells are consumed by the directive, and the cells between them are conditionally rendered.
+
+**In the template:**
+
+| Name | `{%tc if show_detail %}` | Detail | `{%tc endif %}` | Score |
+|---|---|---|---|---|
+
+**Render:**
+
+```python
+tpl = PptxTemplate("template.pptx")
+
+# Detail column is included
+tpl.render({"show_detail": True, ...})
+
+# Detail column is removed
+tpl.render({"show_detail": False, ...})
+```
+
+The `{%tc %}` prefix elevates the Jinja tag to the `<a:tc>` (table cell) XML level. The cells containing the `{%tc %}` tags themselves are replaced by the bare Jinja directive, while the cells between them are conditionally included in the output.
+
+**Note:** PowerPoint defines column widths in a fixed grid (`<a:tblGrid>`), so removing cells may affect the table layout. You may need to adjust column widths or use a merged cell to accommodate the conditional content.
 
 ## Inspecting templates
 
