@@ -2,6 +2,14 @@
 
 Jinja2 templating for PowerPoint `.pptx` files. Like [docxtpl](https://github.com/elapouya/python-docxtpl) but for presentations.
 
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Template syntax](#template-syntax)
+- [RichText](#richtext)
+- [Slide loops](#slide-loops)
+- [Conditional slides](#conditional-slides)
+- [Inspecting templates](#inspecting-templates)
+
 ## Install
 
 ```bash
@@ -145,45 +153,43 @@ If the list is empty, the template slide is removed entirely. Multiple slide loo
 
 ## Conditional slides
 
-pptxtpl renders each slide's XML independently — there's no way for a Jinja2 `{% if %}` block to remove an entire slide, only to blank out its content.
+Use `{%slide if %}` to conditionally include or exclude entire slides based on the render context. Place the tags anywhere on the slide — they're stripped before rendering.
 
-Alternatively, to conditionally include slides, use python first to remove them from the presentation before rendering:
+**In the template:**
+
+```
+{%slide if financials %}
+Revenue: {{ financials.revenue }}
+Profit: {{ financials.profit }}
+{%slide endif %}
+```
+
+**Render:**
 
 ```python
-import json
-from pptx.oxml.ns import qn
 from pptxtpl import PptxTemplate
-
-
-def delete_slide(prs, slide_index):
-    """Remove a slide by zero-based index."""
-    sldIdLst = prs.slides._sldIdLst
-    sldId = sldIdLst[slide_index]
-    rId = sldId.get(qn("r:id"))
-    prs.part.drop_rel(rId)
-    sldIdLst.remove(sldId)
-
-
-# Map optional slide indices to required context keys
-OPTIONAL_SLIDES = {
-    1: "financials",
-    2: "feedback",
-    3: "roadmap",
-}
-
-with open("context.json") as f:
-    context = json.load(f)
 
 tpl = PptxTemplate("template.pptx")
 
-# Remove slides for missing keys (reverse order preserves indices)
-for idx in sorted(OPTIONAL_SLIDES, reverse=True):
-    if OPTIONAL_SLIDES[idx] not in context:
-        delete_slide(tpl._prs, idx)
+# Slide is included — financials is truthy
+tpl.render({"financials": {"revenue": "$4.2M", "profit": "$1.1M"}})
+tpl.save("with_financials.pptx")
 
-tpl.render(context)
-tpl.save("output.pptx")
+# Slide is removed — financials is missing/falsy
+tpl2 = PptxTemplate("template.pptx")
+tpl2.render({})
+tpl2.save("without_financials.pptx")
 ```
+
+The condition is any valid Jinja2 expression:
+
+```
+{%slide if items|length > 0 %}
+{%slide if show_section and has_data %}
+{%slide if user.role == "admin" %}
+```
+
+Conditional slides are evaluated before slide loops, so a `{%slide if %}` can gate a section without needing the loop's iterable to exist when the condition is false.
 
 ## Inspecting templates
 

@@ -170,6 +170,50 @@ def slide_loop_simple_template(tmp_dir):
 
 
 @pytest.fixture
+def conditional_slide_template(tmp_dir):
+    """Create a .pptx with slide-level conditionals.
+
+    Slide 1: Static title
+    Slide 2: {%slide if financials %} ... financial content ... {%slide endif %}
+    Slide 3: {%slide if feedback %} ... feedback content ... {%slide endif %}
+    Slide 4: Static closing
+    """
+    prs = Presentation()
+
+    # Slide 1: static title
+    s1 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb1 = s1.shapes.add_textbox(Inches(1), Inches(1), Inches(5), Inches(1))
+    tb1.text_frame.text = "{{ title }}"
+
+    # Slide 2: conditional financials
+    s2 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb2a = s2.shapes.add_textbox(Inches(1), Inches(0.5), Inches(5), Inches(0.5))
+    tb2a.text_frame.text = "{%slide if financials %}"
+    tb2b = s2.shapes.add_textbox(Inches(1), Inches(1.5), Inches(5), Inches(1))
+    tb2b.text_frame.text = "Revenue: {{ financials.revenue }}"
+    tb2c = s2.shapes.add_textbox(Inches(1), Inches(2.5), Inches(5), Inches(0.5))
+    tb2c.text_frame.text = "{%slide endif %}"
+
+    # Slide 3: conditional feedback
+    s3 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb3a = s3.shapes.add_textbox(Inches(1), Inches(0.5), Inches(5), Inches(0.5))
+    tb3a.text_frame.text = "{%slide if feedback %}"
+    tb3b = s3.shapes.add_textbox(Inches(1), Inches(1.5), Inches(5), Inches(1))
+    tb3b.text_frame.text = "Feedback: {{ feedback }}"
+    tb3c = s3.shapes.add_textbox(Inches(1), Inches(2.5), Inches(5), Inches(0.5))
+    tb3c.text_frame.text = "{%slide endif %}"
+
+    # Slide 4: static closing
+    s4 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb4 = s4.shapes.add_textbox(Inches(1), Inches(1), Inches(5), Inches(1))
+    tb4.text_frame.text = "The End"
+
+    path = os.path.join(tmp_dir, "conditional_slide.pptx")
+    prs.save(path)
+    return path
+
+
+@pytest.fixture
 def table_template(tmp_dir):
     """Create a .pptx with a table containing template variables."""
     prs = Presentation()

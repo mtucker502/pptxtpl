@@ -14,7 +14,7 @@ from pptx.oxml.ns import qn
 
 from pptxtpl.xml_utils import preprocess_xml
 from pptxtpl.richtext import RichText, Listing
-from pptxtpl.slide_ops import clone_slide, delete_slide
+from pptxtpl.slide_ops import clone_slide
 from pptxtpl.exceptions import TemplateRenderError, InvalidTemplateError
 
 
@@ -28,11 +28,19 @@ _SLIDE_FOR_RE = re.compile(
 )
 _SLIDE_ENDFOR_RE = re.compile(r"\{%-?\s*slide\s+endfor\s*-?%\}")
 
+# Slide-level conditional tags: {%slide if EXPR %} and {%slide endif %}
+_SLIDE_IF_RE = re.compile(
+    r"\{%-?\s*slide\s+if\s+(.*?)\s*-?%\}", re.DOTALL
+)
+_SLIDE_ENDIF_RE = re.compile(r"\{%-?\s*slide\s+endif\s*-?%\}")
+
 
 def _strip_slide_tags(xml: str) -> str:
-    """Remove {%slide for%} and {%slide endfor%} tags from XML."""
+    """Remove {%slide ...%} tags from XML."""
     xml = _SLIDE_FOR_RE.sub("", xml)
     xml = _SLIDE_ENDFOR_RE.sub("", xml)
+    xml = _SLIDE_IF_RE.sub("", xml)
+    xml = _SLIDE_ENDIF_RE.sub("", xml)
     return xml
 
 
@@ -99,24 +107,66 @@ class PptxTemplate:
             else:
                 render_context[key] = value
 
-        # Phase 1: Expand slide-level loops (clones slides, modifies slide list)
-        slide_contexts = self._expand_slide_loops(render_context, jinja_env)
+        # Phase 1: Identify conditional slides to remove (defer actual removal
+        # so that sldIdLst length stays stable for slide-loop partname generation)
+        cond_removals = self._find_false_conditional_slides(render_context, jinja_env)
 
-        # Phase 2: Render each slide
+        # Phase 2: Expand slide-level loops (clones slides, modifies slide list)
+        rid_contexts = self._expand_slide_loops(render_context, jinja_env)
+
+        # Phase 3: Remove false conditional slides now that cloning is done
+        sldIdLst = self._prs.slides._sldIdLst
+        for sldId, rId in cond_removals:
+            sldIdLst.remove(sldId)
+            self._prs.part.drop_rel(rId)
+
+        # Phase 4: Render each slide (use rId-based context lookup)
         for i, slide in enumerate(self._prs.slides):
             ctx = render_context.copy()
-            if i in slide_contexts:
-                ctx.update(slide_contexts[i])
+            rId = sldIdLst[i].get(qn("r:id"))
+            if rId in rid_contexts:
+                ctx.update(rid_contexts[rId])
             self._render_slide(slide, ctx, jinja_env)
+
+    def _find_false_conditional_slides(
+        self, context: dict, jinja_env: Environment
+    ) -> list[tuple]:
+        """Identify slides with falsy {%slide if EXPR %} conditions.
+
+        Returns a list of ``(sldId_element, rId)`` tuples for slides that
+        should be removed.  The actual removal is deferred so that the
+        sldIdLst length stays stable for slide-loop partname generation.
+        """
+        sldIdLst = self._prs.slides._sldIdLst
+        removals: list[tuple] = []
+
+        for i, slide in enumerate(self._prs.slides):
+            xml_str = etree.tostring(slide._element, encoding="unicode")
+            xml_str = preprocess_xml(xml_str)
+            match = _SLIDE_IF_RE.search(xml_str)
+            if not match:
+                continue
+            expr = match.group(1).strip()
+            try:
+                expr_fn = jinja_env.compile_expression(expr)
+                result = expr_fn(**context)
+            except Exception as exc:
+                raise TemplateRenderError(
+                    f"Cannot evaluate slide condition '{expr}': {exc}"
+                ) from exc
+            if not result:
+                sldId = sldIdLst[i]
+                rId = sldId.get(qn("r:id"))
+                removals.append((sldId, rId))
+
+        return removals
 
     def _expand_slide_loops(self, context: dict, jinja_env: Environment) -> dict:
         """Detect {%slide for%} tags and expand template slides into clones.
 
-        Returns a dict mapping slide index → per-slide context overrides
+        Returns a dict mapping rId → per-slide context overrides
         (the loop variable and a ``loop`` helper with index/first/last/length).
         """
-        slide_contexts: dict[int, dict] = {}
-
         # First pass: identify template slides
         expansions = []
         for i, slide in enumerate(self._prs.slides):
@@ -127,7 +177,7 @@ class PptxTemplate:
                 expansions.append((i, match.group(1).strip(), match.group(2).strip()))
 
         if not expansions:
-            return slide_contexts
+            return {}
 
         # Map context by rId so indices stay correct across multiple expansions
         rid_context: dict[str, dict] = {}
@@ -212,13 +262,7 @@ class PptxTemplate:
             sldIdLst.remove(template_sldId)
             self._prs.part.drop_rel(rId)
 
-        # Convert rId-keyed contexts to index-keyed using the final slide order
-        for i, sldId in enumerate(sldIdLst):
-            rId = sldId.get(qn("r:id"))
-            if rId in rid_context:
-                slide_contexts[i] = rid_context[rId]
-
-        return slide_contexts
+        return rid_context
 
     def _render_slide(self, slide, context: dict, jinja_env: Environment) -> None:
         """Render a single slide's XML through the Jinja2 pipeline."""
