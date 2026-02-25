@@ -94,6 +94,55 @@ The template just uses `{{ summary }}` — the formatting is applied at render t
 
 Supported styles: `bold`, `italic`, `underline`, `color` (hex), `size` (pt), `font`.
 
+## Slide loops
+
+Use `{%slide for %}` to duplicate an entire slide for each item in a list. Place the tags anywhere on the template slide — they're stripped before rendering.
+
+**In the template** (a single slide):
+
+```
+{%slide for project in projects %}
+Name: {{ project.name }}
+Status: {{ project.status }}
+Tags: {{ project.tags | join(", ") }}
+{%slide endfor %}
+```
+
+**Render:**
+
+```python
+from pptxtpl import PptxTemplate
+
+tpl = PptxTemplate("template.pptx")
+tpl.render({
+    "projects": [
+        {"name": "Atlas", "status": "On track", "tags": ["backend", "Q3"]},
+        {"name": "Beacon", "status": "At risk", "tags": ["frontend", "Q3"]},
+        {"name": "Comet", "status": "Complete", "tags": ["infra", "Q2"]},
+    ],
+})
+tpl.save("output.pptx")
+# → 3 slides, one per project
+```
+
+A `loop` helper is available on each cloned slide, mirroring Jinja2's loop variable:
+
+```
+Slide {{ loop.index }} of {{ loop.length }}
+{% if loop.first %}(Introduction){% endif %}
+{% if loop.last %}(Final){% endif %}
+```
+
+| Variable | Description |
+|---|---|
+| `loop.index` | 1-based iteration count |
+| `loop.index0` | 0-based iteration count |
+| `loop.first` | `True` on the first slide |
+| `loop.last` | `True` on the last slide |
+| `loop.length` | Total number of slides |
+
+If the list is empty, the template slide is removed entirely. Multiple slide loops in one presentation work independently.
+
 ## Conditional slides
 
 pptxtpl renders each slide's XML independently — there's no way for a Jinja2 `{% if %}` block to remove an entire slide, only to blank out its content.
