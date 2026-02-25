@@ -124,6 +124,52 @@ def fragmented_template(tmp_dir):
 
 
 @pytest.fixture
+def slide_loop_template(tmp_dir):
+    """Create a .pptx with a slide-level for loop.
+
+    Slide 1: Title slide (static)
+    Slide 2: Template slide with {%slide for item in items %} ... {%slide endfor %}
+    Slide 3: Closing slide (static)
+    """
+    prs = Presentation()
+
+    # Slide 1: static title
+    s1 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb1 = s1.shapes.add_textbox(Inches(1), Inches(1), Inches(5), Inches(1))
+    tb1.text_frame.text = "{{ title }}"
+
+    # Slide 2: slide loop template
+    s2 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb2 = s2.shapes.add_textbox(Inches(1), Inches(0.5), Inches(5), Inches(0.5))
+    tb2.text_frame.text = "{%slide for item in items %}"
+    tb2b = s2.shapes.add_textbox(Inches(1), Inches(1.5), Inches(5), Inches(1))
+    tb2b.text_frame.text = "Name: {{ item.name }}"
+    tb2c = s2.shapes.add_textbox(Inches(1), Inches(2.5), Inches(5), Inches(0.5))
+    tb2c.text_frame.text = "{%slide endfor %}"
+
+    # Slide 3: static closing
+    s3 = prs.slides.add_slide(prs.slide_layouts[6])
+    tb3 = s3.shapes.add_textbox(Inches(1), Inches(1), Inches(5), Inches(1))
+    tb3.text_frame.text = "The End"
+
+    path = os.path.join(tmp_dir, "slide_loop.pptx")
+    prs.save(path)
+    return path
+
+
+@pytest.fixture
+def slide_loop_simple_template(tmp_dir):
+    """Create a .pptx with a single slide-level for loop (no other slides)."""
+    prs = Presentation()
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    tb = s.shapes.add_textbox(Inches(1), Inches(0.5), Inches(5), Inches(0.5))
+    tb.text_frame.text = "{%slide for name in names %}{{ name }}{%slide endfor %}"
+    path = os.path.join(tmp_dir, "slide_loop_simple.pptx")
+    prs.save(path)
+    return path
+
+
+@pytest.fixture
 def table_template(tmp_dir):
     """Create a .pptx with a table containing template variables."""
     prs = Presentation()

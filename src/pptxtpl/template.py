@@ -10,14 +10,43 @@ from xml.sax.saxutils import escape
 from lxml import etree
 from jinja2 import Environment, BaseLoader, TemplateSyntaxError, meta
 from pptx import Presentation
+from pptx.oxml.ns import qn
 
 from pptxtpl.xml_utils import preprocess_xml
 from pptxtpl.richtext import RichText, Listing
+from pptxtpl.slide_ops import clone_slide, delete_slide
 from pptxtpl.exceptions import TemplateRenderError, InvalidTemplateError
 
 
 # Regex for Jinja tags used to discover undeclared variables
 _JINJA_TAG_RE = re.compile(r"(\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\})", re.DOTALL)
+
+# Slide-level loop tags: {%slide for VAR in EXPR %} and {%slide endfor %}
+_SLIDE_FOR_RE = re.compile(
+    r"\{%-?\s*slide\s+for\s+(\w+(?:\s*,\s*\w+)*)\s+in\s+(.*?)\s*-?%\}",
+    re.DOTALL,
+)
+_SLIDE_ENDFOR_RE = re.compile(r"\{%-?\s*slide\s+endfor\s*-?%\}")
+
+
+def _strip_slide_tags(xml: str) -> str:
+    """Remove {%slide for%} and {%slide endfor%} tags from XML."""
+    xml = _SLIDE_FOR_RE.sub("", xml)
+    xml = _SLIDE_ENDFOR_RE.sub("", xml)
+    return xml
+
+
+def _escape_value(value):
+    """Recursively XML-escape string values in a context value."""
+    if isinstance(value, str):
+        return escape(value)
+    if isinstance(value, dict):
+        return {k: _escape_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_escape_value(v) for v in value)
+    if isinstance(value, (RichText, Listing)):
+        return str(value)
+    return value
 
 
 class PptxTemplate:
@@ -70,8 +99,126 @@ class PptxTemplate:
             else:
                 render_context[key] = value
 
-        for slide in self._prs.slides:
-            self._render_slide(slide, render_context, jinja_env)
+        # Phase 1: Expand slide-level loops (clones slides, modifies slide list)
+        slide_contexts = self._expand_slide_loops(render_context, jinja_env)
+
+        # Phase 2: Render each slide
+        for i, slide in enumerate(self._prs.slides):
+            ctx = render_context.copy()
+            if i in slide_contexts:
+                ctx.update(slide_contexts[i])
+            self._render_slide(slide, ctx, jinja_env)
+
+    def _expand_slide_loops(self, context: dict, jinja_env: Environment) -> dict:
+        """Detect {%slide for%} tags and expand template slides into clones.
+
+        Returns a dict mapping slide index → per-slide context overrides
+        (the loop variable and a ``loop`` helper with index/first/last/length).
+        """
+        slide_contexts: dict[int, dict] = {}
+
+        # First pass: identify template slides
+        expansions = []
+        for i, slide in enumerate(self._prs.slides):
+            xml_str = etree.tostring(slide._element, encoding="unicode")
+            xml_str = preprocess_xml(xml_str)
+            match = _SLIDE_FOR_RE.search(xml_str)
+            if match:
+                expansions.append((i, match.group(1).strip(), match.group(2).strip()))
+
+        if not expansions:
+            return slide_contexts
+
+        # Map context by rId so indices stay correct across multiple expansions
+        rid_context: dict[str, dict] = {}
+        sldIdLst = self._prs.slides._sldIdLst
+
+        # Keep template sldIds in sldIdLst during expansion so that
+        # add_slide (which uses len(sldIdLst) for partnames) never
+        # generates duplicate names.  Remove them all at the end.
+        deferred_removals: list[tuple] = []  # (template_sldId, rId)
+
+        # Process in reverse order so that earlier indices remain valid
+        for slide_idx, var_names_str, iterable_expr in reversed(expansions):
+            # Evaluate the iterable expression using Jinja2
+            try:
+                expr_fn = jinja_env.compile_expression(iterable_expr)
+                items = list(expr_fn(**context))
+            except Exception as exc:
+                raise TemplateRenderError(
+                    f"Cannot evaluate slide loop iterable '{iterable_expr}': {exc}"
+                ) from exc
+
+            template_sldId = sldIdLst[slide_idx]
+            rId = template_sldId.get(qn("r:id"))
+
+            if not items:
+                deferred_removals.append((template_sldId, rId))
+                continue
+
+            source_slide = self._prs.slides[slide_idx]
+
+            # Clone the slide for each item — do NOT touch sldIdLst between
+            # clones, because add_slide uses len(prs.slides) to generate
+            # unique part names.
+            n_before = len(list(sldIdLst))
+            for _ in items:
+                clone_slide(self._prs, source_slide)
+
+            # Collect the clone sldIds (they were appended at the end)
+            n_clones = len(items)
+            clone_sldIds = [sldIdLst[n_before + i] for i in range(n_clones)]
+
+            # Remove clones from the end of sldIdLst
+            for sldId in reversed(clone_sldIds):
+                sldIdLst.remove(sldId)
+
+            # Insert clones just before the template slide
+            template_pos = list(sldIdLst).index(template_sldId)
+            for i, clone_sldId in enumerate(clone_sldIds):
+                sldIdLst.insert(template_pos + i, clone_sldId)
+
+            # Mark template for deferred removal (keep in sldIdLst for now)
+            deferred_removals.append((template_sldId, rId))
+
+            # Store per-slide context keyed by rId
+            var_list = [v.strip() for v in var_names_str.split(",")]
+            n_items = len(items)
+            for i, (clone_sldId, item) in enumerate(zip(clone_sldIds, items)):
+                clone_rId = clone_sldId.get(qn("r:id"))
+                ctx: dict = {}
+
+                # Bind loop variable(s) — with recursive XML escaping
+                escaped_item = _escape_value(item)
+                if len(var_list) == 1:
+                    ctx[var_list[0]] = escaped_item
+                else:
+                    for var_name, val in zip(var_list, escaped_item):
+                        ctx[var_name] = val
+
+                # Provide a loop helper (mirrors Jinja2's loop variable)
+                ctx["loop"] = {
+                    "index": i + 1,
+                    "index0": i,
+                    "first": i == 0,
+                    "last": i == n_items - 1,
+                    "length": n_items,
+                }
+
+                rid_context[clone_rId] = ctx
+
+        # Now remove all template slides and drop their relationships
+        for template_sldId, rId in deferred_removals:
+            sldIdLst.remove(template_sldId)
+            self._prs.part.drop_rel(rId)
+
+        # Convert rId-keyed contexts to index-keyed using the final slide order
+        for i, sldId in enumerate(sldIdLst):
+            rId = sldId.get(qn("r:id"))
+            if rId in rid_context:
+                slide_contexts[i] = rid_context[rId]
+
+        return slide_contexts
 
     def _render_slide(self, slide, context: dict, jinja_env: Environment) -> None:
         """Render a single slide's XML through the Jinja2 pipeline."""
@@ -83,6 +230,9 @@ class PptxTemplate:
 
         # Preprocess: fix fragmented delimiters, strip internal tags, etc.
         xml_str = preprocess_xml(xml_str)
+
+        # Strip slide-level loop tags (already handled by _expand_slide_loops)
+        xml_str = _strip_slide_tags(xml_str)
 
         # Check if there are any Jinja tags after preprocessing
         if not _JINJA_TAG_RE.search(xml_str):
@@ -173,6 +323,7 @@ class PptxTemplate:
         for slide in self._prs.slides:
             xml_str = etree.tostring(slide._element, encoding="unicode")
             xml_str = preprocess_xml(xml_str)
+            xml_str = _strip_slide_tags(xml_str)
 
             try:
                 ast = jinja_env.parse(xml_str)
