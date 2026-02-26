@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pptxtpl"
+version = "0.1.0"
+description = "Jinja2 templating for PowerPoint .pptx files"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "python-pptx",
+    "Jinja2",
+    "lxml",
+]
