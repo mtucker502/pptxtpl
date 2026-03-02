@@ -11,6 +11,7 @@ Jinja2 templating for PowerPoint `.pptx` files. Like [docxtpl](https://github.co
 - [Table row loops](#table-row-loops)
 - [Table cell conditionals](#table-cell-conditionals)
 - [Inspecting templates](#inspecting-templates)
+- [Sandboxed rendering](#sandboxed-rendering)
 
 ## Install
 
@@ -256,3 +257,18 @@ tpl = PptxTemplate("template.pptx")
 print(tpl.get_undeclared_template_variables())
 # {'title', 'author', 'items', 'metrics', ...}
 ```
+
+## Sandboxed rendering
+
+By default, pptxtpl uses Jinja2's standard `Environment`, which does not restrict what template authors can access. If you render templates from untrusted sources (e.g., user-uploaded `.pptx` files), pass a `SandboxedEnvironment` to prevent access to private attributes and unsafe methods:
+
+```python
+from pptxtpl import PptxTemplate
+from jinja2.sandbox import SandboxedEnvironment
+
+tpl = PptxTemplate("untrusted_template.pptx")
+tpl.render({"name": "World"}, jinja_env=SandboxedEnvironment())
+tpl.save("output.pptx")
+```
+
+With sandboxing enabled, templates that attempt to access private attributes (e.g., `{{ obj.__class__ }}`) will raise a `jinja2.exceptions.SecurityError` instead of executing.
