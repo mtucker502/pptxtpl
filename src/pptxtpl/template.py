@@ -340,9 +340,8 @@ class PptxTemplate:
                 return match.group(0)
             # Split on \n and join with line break XML
             parts = content.split("\n")
-            result = opening + parts[0] + "</a:t></a:r><a:br/><a:r>" + ("<a:t>".join(
-                p + "</a:t></a:r><a:br/><a:r>" for p in parts[1:-1]
-            )) + "<a:t>" + parts[-1] + "</a:t>"
+            br = "</a:t></a:r><a:br/><a:r><a:t>"
+            result = opening + br.join(parts) + "</a:t>"
             return result
 
         return re.sub(r"(<a:t[^>]*>)(.*?)</a:t>", _replace_in_at, xml, flags=re.DOTALL)
