@@ -109,7 +109,9 @@ Supported styles: `bold`, `italic`, `underline`, `color` (hex), `size` (pt), `fo
 
 Use `{%slide for %}` to duplicate an entire slide for each item in a list. Place the tags anywhere on the template slide — they're stripped before rendering.
 
-**In the template** (a single slide):
+### Single-slide loop
+
+When both tags are on the same slide, that slide is duplicated once per item:
 
 ```
 {%slide for project in projects %}
@@ -118,8 +120,6 @@ Status: {{ project.status }}
 Tags: {{ project.tags | join(", ") }}
 {%slide endfor %}
 ```
-
-**Render:**
 
 ```python
 from pptxtpl import PptxTemplate
@@ -136,6 +136,48 @@ tpl.save("output.pptx")
 # → 3 slides, one per project
 ```
 
+### Multi-slide loop
+
+Place `{%slide for %}` on one slide and `{%slide endfor %}` on a later slide to duplicate the entire group as a unit. All slides between (and including) the two tags are cloned together for each iteration.
+
+**In the template** (two slides per project):
+
+```
+Slide 1 (static):  Title
+
+Slide 2 (loop start):
+  {%slide for project in projects %}
+  Summary: {{ project.name }}
+  Status: {{ project.status }}
+
+Slide 3 (loop end):
+  Description: {{ project.description }}
+  Tags: {{ project.tags | join(", ") }}
+  {%slide endfor %}
+
+Slide 4 (static):  Closing
+```
+
+**Render:**
+
+```python
+tpl = PptxTemplate("template.pptx")
+tpl.render({
+    "projects": [
+        {"name": "Atlas", "status": "On track",
+         "description": "Backend API platform.", "tags": ["backend", "Q1"]},
+        {"name": "Beacon", "status": "At risk",
+         "description": "Notification overhaul.", "tags": ["frontend", "Q1"]},
+    ],
+})
+tpl.save("output.pptx")
+# → 6 slides: Title, Atlas Summary, Atlas Details, Beacon Summary, Beacon Details, Closing
+```
+
+The group can span any number of slides. The loop variable and `loop` helper are available on every slide in the group.
+
+### Loop helper
+
 A `loop` helper is available on each cloned slide, mirroring Jinja2's loop variable:
 
 ```
@@ -148,11 +190,11 @@ Slide {{ loop.index }} of {{ loop.length }}
 |---|---|
 | `loop.index` | 1-based iteration count |
 | `loop.index0` | 0-based iteration count |
-| `loop.first` | `True` on the first slide |
-| `loop.last` | `True` on the last slide |
-| `loop.length` | Total number of slides |
+| `loop.first` | `True` on the first iteration |
+| `loop.last` | `True` on the last iteration |
+| `loop.length` | Total number of iterations |
 
-If the list is empty, the template slide is removed entirely. Multiple slide loops in one presentation work independently.
+If the list is empty, all template slides in the group are removed. Multiple slide loops (single or multi-slide) in one presentation work independently.
 
 ## Conditional slides
 

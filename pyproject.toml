@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pptxtpl"
-version = "0.1.2"
+version = "0.2.0"
 description = "Jinja2 templating for PowerPoint .pptx files"
 readme = "README.md"
 license = "MIT"
