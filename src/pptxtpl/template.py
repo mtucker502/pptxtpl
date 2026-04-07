@@ -380,20 +380,44 @@ class PptxTemplate:
         return xml
 
     def _replace_newlines_in_text(self, xml: str) -> str:
-        """Replace literal \\n characters inside <a:t> elements with <a:br/> elements."""
+        """Replace literal \\n characters inside <a:t> elements with <a:br/> elements.
 
-        def _replace_in_at(match: re.Match) -> str:
-            opening = match.group(1)
-            content = match.group(2)
+        Each split run and the inserted <a:br/> carries the original run's
+        <a:rPr> so PowerPoint Online preserves formatting (size, bold, font).
+        Bare <a:r><a:t> with no rPr inherits from the layout/master in Online,
+        which produces wrong sizes even when desktop PowerPoint renders fine.
+        """
+
+        run_re = re.compile(
+            r"<a:r>(?:\s*(<a:rPr\b[^>]*(?:/>|>.*?</a:rPr>)))?\s*"
+            r"(<a:t\b[^>]*>)(.*?)</a:t>\s*</a:r>",
+            re.DOTALL,
+        )
+
+        def _replace_run(match: re.Match) -> str:
+            rpr = match.group(1) or ""
+            t_open = match.group(2)
+            content = match.group(3)
             if "\n" not in content:
                 return match.group(0)
-            # Split on \n and join with line break XML
-            parts = content.split("\n")
-            br = "</a:t></a:r><a:br/><a:r><a:t>"
-            result = opening + br.join(parts) + "</a:t>"
-            return result
 
-        return re.sub(r"(<a:t[^>]*>)(.*?)</a:t>", _replace_in_at, xml, flags=re.DOTALL)
+            # Build a self-closing rPr to attach to <a:br>.  <a:br> only accepts
+            # an empty rPr child, so collapse <a:rPr ...>...</a:rPr> if needed.
+            br_rpr = ""
+            if rpr:
+                m = re.match(r"<a:rPr\b([^>]*?)/>", rpr)
+                if m:
+                    br_rpr = f"<a:rPr{m.group(1)}/>"
+                else:
+                    m = re.match(r"<a:rPr\b([^>]*?)>", rpr)
+                    if m:
+                        br_rpr = f"<a:rPr{m.group(1)}/>"
+            br = f"</a:t></a:r><a:br>{br_rpr}</a:br><a:r>{rpr}{t_open}"
+
+            parts = content.split("\n")
+            return f"<a:r>{rpr}{t_open}{br.join(parts)}</a:t></a:r>"
+
+        return run_re.sub(_replace_run, xml)
 
     def save(self, output_path: str) -> None:
         """Save the rendered presentation to a file."""

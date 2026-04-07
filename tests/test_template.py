@@ -7,6 +7,31 @@ from pptx import Presentation
 
 from pptxtpl import PptxTemplate
 from pptxtpl.exceptions import InvalidTemplateError
+from pptxtpl.template import PptxTemplate as _Tpl
+
+
+class TestNewlineRunFormatting:
+    def test_split_runs_inherit_rPr(self):
+        xml = (
+            '<a:r><a:rPr lang="en-US" sz="1300" b="1"/>'
+            '<a:t>line1\nline2\nline3</a:t></a:r>'
+        )
+        out = _Tpl.__dict__["_replace_newlines_in_text"](_Tpl.__new__(_Tpl), xml)
+        # 3 runs, each with the original rPr
+        assert out.count('sz="1300"') == 5  # 3 runs + 2 brs
+        assert out.count("<a:br") == 2
+        assert "line1" in out and "line2" in out and "line3" in out
+
+    def test_no_newline_unchanged(self):
+        xml = '<a:r><a:rPr sz="1200"/><a:t>hello</a:t></a:r>'
+        out = _Tpl.__dict__["_replace_newlines_in_text"](_Tpl.__new__(_Tpl), xml)
+        assert out == xml
+
+    def test_run_without_rPr(self):
+        xml = "<a:r><a:t>a\nb</a:t></a:r>"
+        out = _Tpl.__dict__["_replace_newlines_in_text"](_Tpl.__new__(_Tpl), xml)
+        assert "<a:br></a:br>" in out
+        assert "a" in out and "b" in out
 
 
 class TestPptxTemplateInit:
