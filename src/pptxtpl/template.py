@@ -14,7 +14,7 @@ from pptx.oxml.ns import qn
 
 from pptxtpl.xml_utils import preprocess_xml, dedupe_table_ids
 from pptxtpl.richtext import RichText, Listing
-from pptxtpl.slide_ops import clone_slide
+from pptxtpl.slide_ops import clone_slide, _drop_slide_owned_rels
 from pptxtpl.exceptions import TemplateRenderError, InvalidTemplateError
 
 
@@ -98,18 +98,16 @@ class PptxTemplate:
         # Convert context values for Jinja2:
         # - RichText/Listing → their XML string representation (already escaped)
         # - Plain strings → XML-escaped to prevent invalid XML after rendering
-        render_context = {}
-        for key, value in context.items():
-            if isinstance(value, (RichText, Listing)):
-                render_context[key] = str(value)
-            elif isinstance(value, str):
-                render_context[key] = escape(value)
-            else:
-                render_context[key] = value
+        render_context = {k: _escape_value(v) for k, v in context.items()}
 
         # Phase 1: Identify conditional slides to remove (defer actual removal
         # so that sldIdLst length stays stable for slide-loop partname generation)
         cond_removals = self._find_false_conditional_slides(render_context, jinja_env)
+
+        # Validate that no {%slide if%} appears inside a {%slide for%} range,
+        # which has undefined semantics (the if is evaluated against the
+        # original context, not per-iteration).
+        self._validate_no_if_inside_for()
 
         # Phase 2: Expand slide-level loops (clones slides, modifies slide list)
         rid_contexts = self._expand_slide_loops(render_context, jinja_env)
@@ -117,8 +115,7 @@ class PptxTemplate:
         # Phase 3: Remove false conditional slides now that cloning is done
         sldIdLst = self._prs.slides._sldIdLst
         for sldId, rId in cond_removals:
-            sldIdLst.remove(sldId)
-            self._prs.part.drop_rel(rId)
+            self._drop_slide_by_rid(sldIdLst, sldId, rId)
 
         # Phase 4: Render each slide (use rId-based context lookup)
         for i, slide in enumerate(self._prs.slides):
@@ -127,6 +124,45 @@ class PptxTemplate:
             if rId in rid_contexts:
                 ctx.update(rid_contexts[rId])
             self._render_slide(slide, ctx, jinja_env)
+
+    def _validate_no_if_inside_for(self) -> None:
+        """Raise if any {%slide if%} appears inside a {%slide for%} range."""
+        for_ranges: list[tuple[int, int]] = []
+        if_indices: list[int] = []
+        open_for: int | None = None
+        for i, slide in enumerate(self._prs.slides):
+            xml_str = etree.tostring(slide._element, encoding="unicode")
+            xml_str = preprocess_xml(xml_str)
+            if _SLIDE_FOR_RE.search(xml_str):
+                open_for = i
+            if _SLIDE_IF_RE.search(xml_str):
+                if_indices.append(i)
+            if _SLIDE_ENDFOR_RE.search(xml_str):
+                if open_for is not None:
+                    for_ranges.append((open_for, i))
+                    open_for = None
+        for idx in if_indices:
+            for start, end in for_ranges:
+                if start <= idx <= end:
+                    raise InvalidTemplateError(
+                        "{%slide if%} cannot appear on a slide inside a "
+                        "{%slide for%} ... endfor range"
+                    )
+
+    def _drop_slide_by_rid(self, sldIdLst, sldId, rId) -> None:
+        """Remove a slide and clean up parts it owned (e.g. notesSlide).
+
+        Without this, removing a slide that has speaker notes leaves the
+        notes part orphaned (its only reference was the deleted slide).
+        """
+        try:
+            slide_part = self._prs.part.related_part(rId)
+        except KeyError:
+            slide_part = None
+        if slide_part is not None:
+            _drop_slide_owned_rels(slide_part)
+        sldIdLst.remove(sldId)
+        self._prs.part.drop_rel(rId)
 
     def _find_false_conditional_slides(
         self, context: dict, jinja_env: Environment
@@ -143,10 +179,14 @@ class PptxTemplate:
         for i, slide in enumerate(self._prs.slides):
             xml_str = etree.tostring(slide._element, encoding="unicode")
             xml_str = preprocess_xml(xml_str)
-            match = _SLIDE_IF_RE.search(xml_str)
-            if not match:
+            matches = _SLIDE_IF_RE.findall(xml_str)
+            if not matches:
                 continue
-            expr = match.group(1).strip()
+            if len(matches) > 1:
+                raise InvalidTemplateError(
+                    "Only one {%slide if%} per slide is supported"
+                )
+            expr = matches[0].strip()
             try:
                 expr_fn = jinja_env.compile_expression(expr)
                 result = expr_fn(**context)
@@ -276,14 +316,14 @@ class PptxTemplate:
             var_list = [v.strip() for v in var_names_str.split(",")]
             n_items = len(items)
             for item_idx, item in enumerate(items):
-                escaped_item = _escape_value(item)
+                # Items come from render_context which is already
+                # recursively XML-escaped by render(); don't double-escape.
                 ctx: dict = {}
 
-                # Bind loop variable(s) — with recursive XML escaping
                 if len(var_list) == 1:
-                    ctx[var_list[0]] = escaped_item
+                    ctx[var_list[0]] = item
                 else:
-                    for var_name, val in zip(var_list, escaped_item):
+                    for var_name, val in zip(var_list, item):
                         ctx[var_name] = val
 
                 # Provide a loop helper (mirrors Jinja2's loop variable)
@@ -299,12 +339,13 @@ class PptxTemplate:
                 for offset in range(group_size):
                     clone_idx = item_idx * group_size + offset
                     clone_rId = clone_sldIds[clone_idx].get(qn("r:id"))
-                    rid_context[clone_rId] = ctx
+                    # Defensive copy: each slide owns its own context dict
+                    # so later mutations on one slide can't affect siblings.
+                    rid_context[clone_rId] = dict(ctx)
 
         # Now remove all template slides and drop their relationships
         for template_sldId, rId in deferred_removals:
-            sldIdLst.remove(template_sldId)
-            self._prs.part.drop_rel(rId)
+            self._drop_slide_by_rid(sldIdLst, template_sldId, rId)
 
         return rid_context
 
@@ -372,7 +413,9 @@ class PptxTemplate:
         """Convert escape sequences in rendered text to PowerPoint XML.
 
         - ``\\n`` inside <a:t> elements becomes ``<a:br/>``
-        - ``\\a`` becomes a paragraph break (closes and reopens <a:p>)
+
+        TODO: ``\\a`` paragraph break is not yet implemented; it would
+        require splitting the enclosing <a:p> while cloning <a:pPr>.
         """
         # Handle \n → line break within <a:t> elements
         # We replace \n in text content with </a:t></a:r><a:br/><a:r><a:t>
@@ -436,16 +479,18 @@ class PptxTemplate:
 
         all_vars: set[str] = set()
 
-        for slide in self._prs.slides:
+        for i, slide in enumerate(self._prs.slides):
             xml_str = etree.tostring(slide._element, encoding="unicode")
             xml_str = preprocess_xml(xml_str)
             xml_str = _strip_slide_tags(xml_str)
 
             try:
                 ast = jinja_env.parse(xml_str)
-                variables = meta.find_undeclared_variables(ast)
-                all_vars.update(variables)
-            except TemplateSyntaxError:
-                pass  # Skip slides with syntax errors
+            except TemplateSyntaxError as exc:
+                raise TemplateRenderError(
+                    f"Jinja2 syntax error on slide {i + 1}: {exc}"
+                ) from exc
+            variables = meta.find_undeclared_variables(ast)
+            all_vars.update(variables)
 
         return all_vars

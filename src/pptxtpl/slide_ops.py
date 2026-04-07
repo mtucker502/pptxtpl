@@ -1,6 +1,7 @@
 """Slide-level operations: cloning and deletion."""
 
 import copy
+import re
 
 from lxml import etree
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -90,7 +91,16 @@ def _clone_notes_slide_part(new_slide_part, src_notes_part):
     references inside the copied notes XML are remapped to the new rIds.
     """
     package = new_slide_part.package
-    notes_master_part = package.presentation_part.notes_master_part
+    try:
+        notes_master_part = package.presentation_part.notes_master_part
+    except Exception as exc:
+        # python-pptx normally creates a notes master on demand; if that
+        # fails (e.g. an unusual presentation without one), surface a
+        # clear error rather than a confusing AttributeError downstream.
+        raise RuntimeError(
+            "Cannot clone notes slide: presentation has no notes master "
+            f"and one could not be created ({exc})"
+        ) from exc
 
     new_notes_part = NotesSlidePart(
         package.next_partname("/ppt/notesSlides/notesSlide%d.xml"),
@@ -121,11 +131,27 @@ def _clone_notes_slide_part(new_slide_part, src_notes_part):
     return new_notes_part
 
 
+def _drop_slide_owned_rels(slide_part):
+    """Drop relationships owned by a slide that would otherwise orphan parts.
+
+    Currently drops the notesSlide rel so the notes part isn't left as
+    an orphan whose only reference was from a now-deleted slide.
+    """
+    notes_rids = [
+        rid for rid, rel in slide_part.rels.items()
+        if rel.reltype == RT.NOTES_SLIDE
+    ]
+    for rid in notes_rids:
+        slide_part.drop_rel(rid)
+
+
 def delete_slide(prs, slide_index):
     """Remove a slide from the presentation by its zero-based index."""
     sldIdLst = prs.slides._sldIdLst
     sldId = sldIdLst[slide_index]
     rId = sldId.get(qn("r:id"))
+    slide_part = prs.part.related_part(rId)
+    _drop_slide_owned_rels(slide_part)
     prs.part.drop_rel(rId)
     sldIdLst.remove(sldId)
 
@@ -137,8 +163,12 @@ def _remap_rids(element, remap):
     attribute values containing old rIds.
     """
     xml_str = etree.tostring(element, encoding="unicode")
-    for old_rid, new_rid in remap.items():
-        xml_str = xml_str.replace(f'"{old_rid}"', f'"{new_rid}"')
+    # Single-pass replacement to avoid chained-rename collisions
+    # (e.g. {rId2: rId3, rId3: rId4} must not double-substitute).
+    pattern = re.compile(
+        r'"(' + "|".join(re.escape(k) for k in remap) + r')"'
+    )
+    xml_str = pattern.sub(lambda m: f'"{remap[m.group(1)]}"', xml_str)
 
     new_element = etree.fromstring(xml_str.encode("utf-8"))
 

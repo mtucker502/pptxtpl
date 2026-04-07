@@ -9,6 +9,8 @@ import random
 import re
 from html import unescape
 
+from pptxtpl.exceptions import InvalidTemplateError
+
 # Microsoft 2014 drawing extension a16:rowId / a16:colId values.  PowerPoint
 # generates these as random unsigned 32-bit integers and requires them to be
 # unique within a single table (rowIds among rows, colIds among columns).
@@ -173,15 +175,18 @@ def _elevate_prefix(xml: str, prefix: str, element_tag: str) -> str:
         # Search backwards from the tag for the opening element
         enclosing_start = _find_enclosing_open(xml, tag_start, element_tag)
         if enclosing_start is None:
-            # Can't find enclosing element; leave the tag as-is but strip prefix
-            xml = xml[:tag_match.start()] + bare_tag + xml[tag_match.end():]
-            continue
+            raise InvalidTemplateError(
+                f"{{%{prefix} ...%}} tag not enclosed in expected "
+                f"<{element_tag}> element"
+            )
 
         # Search forwards from the tag for the closing element
         enclosing_end = _find_enclosing_close(xml, tag_end, element_tag)
         if enclosing_end is None:
-            xml = xml[:tag_match.start()] + bare_tag + xml[tag_match.end():]
-            continue
+            raise InvalidTemplateError(
+                f"{{%{prefix} ...%}} tag not enclosed in expected "
+                f"<{element_tag}> element"
+            )
 
         # Replace the entire enclosing element with the bare Jinja tag
         xml = xml[:enclosing_start] + bare_tag + xml[enclosing_end:]
@@ -267,12 +272,8 @@ def clean_entities_in_tags(xml: str) -> str:
 
     def _unescape_tag(match: re.Match) -> str:
         tag = match.group(0)
-        # Unescape HTML entities
-        tag = tag.replace("&lt;", "<")
-        tag = tag.replace("&gt;", ">")
-        tag = tag.replace("&amp;", "&")
-        tag = tag.replace("&apos;", "'")
-        tag = tag.replace("&quot;", '"')
+        # Unescape HTML entities, including numeric (&#39; / &#x27;)
+        tag = unescape(tag)
         # Fix smart quotes (common in PowerPoint)
         tag = tag.replace("\u201c", '"')  # left double quote
         tag = tag.replace("\u201d", '"')  # right double quote
