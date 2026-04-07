@@ -188,6 +188,28 @@ def _elevate_prefix(xml: str, prefix: str, element_tag: str) -> str:
                 f"<{element_tag}> element"
             )
 
+        # Detect the partner-in-same-element case for paired block tags.
+        # Elevation removes the entire enclosing element, so a partner tag
+        # (endfor / endif / else) sharing the same element would be silently
+        # consumed and Jinja would later raise a confusing parse error.
+        keyword = inner.split()[0] if inner.split() else ""
+        partners = {
+            "for": ("endfor", "else"),
+            "if": ("endif", "else", "elif"),
+        }.get(keyword, ())
+        if partners:
+            enclosing_xml = xml[enclosing_start:enclosing_end]
+            partner_re = re.compile(
+                r"\{%\s*" + re.escape(prefix) + r"\s+(?:"
+                + "|".join(re.escape(p) for p in partners)
+                + r")\b"
+            )
+            if partner_re.search(enclosing_xml):
+                raise InvalidTemplateError(
+                    f"{{%{prefix} {keyword}%}} and its partner tag must be "
+                    f"in separate <{element_tag}> elements"
+                )
+
         # Replace the entire enclosing element with the bare Jinja tag
         xml = xml[:enclosing_start] + bare_tag + xml[enclosing_end:]
 

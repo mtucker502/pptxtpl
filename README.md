@@ -238,13 +238,15 @@ Conditional slides are evaluated before slide loops, so a `{%slide if %}` can ga
 
 ## Table row loops
 
-Use `{%tr for %}` to duplicate a table row for each item in a list. Place the opening tag in the first cell and the closing tag in the last cell of the row you want to repeat.
+Use `{%tr for %}` to duplicate a table row for each item in a list. The opening and closing tags **must be in separate rows**: a marker row containing only `{%tr for ... %}`, one or more body rows that get repeated, and a marker row containing only `{%tr endfor %}`. The marker rows are removed; the body rows are cloned per iteration.
 
-**In the template** (a table with a header row and one template row):
+**In the template** (4 rows: header, for-marker, body, endfor-marker):
 
 | Metric | Value | Status |
 |---|---|---|
-| `{%tr for m in metrics %}{{ m.name }}` | `{{ m.value }}` | `{{ m.status }}{%tr endfor %}` |
+| `{%tr for m in metrics %}` | | |
+| `{{ m.name }}` | `{{ m.value }}` | `{{ m.status }}` |
+| `{%tr endfor %}` | | |
 
 **Render:**
 
@@ -261,9 +263,9 @@ tpl.save("output.pptx")
 # → Table has 4 rows: 1 header + 3 data rows
 ```
 
-The `{%tr %}` prefix elevates the Jinja tag to the `<a:tr>` (table row) XML level, so the loop wraps the entire row element.
+The `{%tr %}` prefix elevates the Jinja tag to the `<a:tr>` (table row) XML level, removing the marker row entirely. Placing both `{%tr for%}` and `{%tr endfor%}` inside the same row consumes both markers together and raises `InvalidTemplateError`.
 
-Conditionals work the same way — `{%tr if condition %}...{%tr endif %}` to include or exclude a row.
+Conditionals work the same way — `{%tr if condition %}` and `{%tr endif %}` in separate marker rows wrap the body row(s) between them.
 
 ## Table cell conditionals
 
