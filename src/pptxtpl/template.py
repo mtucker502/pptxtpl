@@ -12,7 +12,7 @@ from jinja2 import Environment, BaseLoader, TemplateSyntaxError, meta
 from pptx import Presentation
 from pptx.oxml.ns import qn
 
-from pptxtpl.xml_utils import preprocess_xml
+from pptxtpl.xml_utils import preprocess_xml, dedupe_table_ids
 from pptxtpl.richtext import RichText, Listing
 from pptxtpl.slide_ops import clone_slide
 from pptxtpl.exceptions import TemplateRenderError, InvalidTemplateError
@@ -341,6 +341,11 @@ class PptxTemplate:
 
         # Post-process: convert \n to line breaks, \a to paragraph breaks
         rendered_xml = self._post_process(rendered_xml)
+
+        # Regenerate duplicate a16:rowId / a16:colId values introduced when
+        # {%tr for ... %} loops cloned the template row.  Without this,
+        # PowerPoint Online collapses rows that share an id.
+        rendered_xml = dedupe_table_ids(rendered_xml)
 
         # Parse the rendered XML back into an element tree
         try:

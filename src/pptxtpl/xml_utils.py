@@ -5,8 +5,24 @@ elements, fragmenting Jinja2 tags like {{ and {% %}. These functions reconstitut
 fragments before Jinja2 can process them.
 """
 
+import random
 import re
 from html import unescape
+
+# Microsoft 2014 drawing extension a16:rowId / a16:colId values.  PowerPoint
+# generates these as random unsigned 32-bit integers and requires them to be
+# unique within a single table (rowIds among rows, colIds among columns).
+# When pptxtpl expands a Jinja {%tr for ... %} loop, the cloned rows inherit
+# the template row's rowId, producing duplicates.  PowerPoint desktop tolerates
+# this, but PowerPoint Online de-duplicates rows that share an id and renders
+# only one — see ``dedupe_table_ids``.
+_TABLE_RE = re.compile(r"<a:tbl\b.*?</a:tbl>", re.DOTALL)
+_ROWID_RE = re.compile(
+    r'(<a16:rowId\b[^>]*\bval=")(\d+)(")'
+)
+_COLID_RE = re.compile(
+    r'(<a16:colId\b[^>]*\bval=")(\d+)(")'
+)
 
 # PowerPoint XML namespaces
 NSMAP = {
@@ -265,6 +281,46 @@ def clean_entities_in_tags(xml: str) -> str:
         return tag
 
     return _JINJA_TAG.sub(_unescape_tag, xml)
+
+
+def dedupe_table_ids(xml: str, _rng: random.Random | None = None) -> str:
+    """Regenerate duplicate ``a16:rowId``/``a16:colId`` values inside tables.
+
+    PowerPoint Online uses these ids to identify rows and columns and silently
+    collapses any rows that share an id, which makes ``{%tr for ... %}`` loops
+    appear to render only one row in the main view (the sidebar thumbnail uses
+    a different code path and shows them all).  This rewrites duplicates to
+    fresh random uint32 values, matching how PowerPoint itself mints ids.
+    """
+    rng = _rng or random.Random()
+
+    def _fresh(used: set[int]) -> int:
+        while True:
+            val = rng.randint(1, 2**32 - 1)
+            if val not in used:
+                used.add(val)
+                return val
+
+    def _dedupe(pattern: re.Pattern, table_xml: str) -> str:
+        used: set[int] = set()
+
+        def _sub(match: re.Match) -> str:
+            val = int(match.group(2))
+            if val in used:
+                val = _fresh(used)
+            else:
+                used.add(val)
+            return f"{match.group(1)}{val}{match.group(3)}"
+
+        return pattern.sub(_sub, table_xml)
+
+    def _process_table(match: re.Match) -> str:
+        table_xml = match.group(0)
+        table_xml = _dedupe(_ROWID_RE, table_xml)
+        table_xml = _dedupe(_COLID_RE, table_xml)
+        return table_xml
+
+    return _TABLE_RE.sub(_process_table, xml)
 
 
 def preprocess_xml(xml: str) -> str:

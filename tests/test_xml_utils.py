@@ -1,5 +1,8 @@
 """Tests for xml_utils module — XML preprocessing functions."""
 
+import random
+import re
+
 from pptxtpl.xml_utils import (
     clean_jinja_delimiters,
     strip_internal_tags,
@@ -7,7 +10,52 @@ from pptxtpl.xml_utils import (
     elevate_special_tags,
     clean_entities_in_tags,
     preprocess_xml,
+    dedupe_table_ids,
 )
+
+
+def _row(rowid: int) -> str:
+    return (
+        '<a:tr h="100"><a:tc><a:txBody><a:p/></a:txBody></a:tc>'
+        f'<a:extLst><a:ext uri="{{0D108BD9-81ED-4DB2-BD59-A6C34878D82A}}">'
+        f'<a16:rowId xmlns:a16="http://schemas.microsoft.com/office/drawing/2014/main" val="{rowid}"/>'
+        '</a:ext></a:extLst></a:tr>'
+    )
+
+
+class TestDedupeTableIds:
+    def test_duplicate_rowids_are_regenerated(self):
+        xml = "<a:tbl>" + _row(123) + _row(123) + _row(123) + "</a:tbl>"
+        out = dedupe_table_ids(xml, _rng=random.Random(0))
+        ids = [int(v) for v in re.findall(r'a16:rowId[^v]*val="(\d+)"', out)]
+        assert len(ids) == 3
+        assert len(set(ids)) == 3
+        assert ids[0] == 123  # first occurrence preserved
+
+    def test_unique_rowids_are_left_alone(self):
+        xml = "<a:tbl>" + _row(1) + _row(2) + _row(3) + "</a:tbl>"
+        out = dedupe_table_ids(xml)
+        assert out == xml
+
+    def test_duplicate_colids_are_regenerated(self):
+        col = (
+            '<a:gridCol w="100"><a:extLst><a:ext uri="x">'
+            '<a16:colId xmlns:a16="http://schemas.microsoft.com/office/drawing/2014/main" val="42"/>'
+            '</a:ext></a:extLst></a:gridCol>'
+        )
+        xml = "<a:tbl><a:tblGrid>" + col + col + "</a:tblGrid></a:tbl>"
+        out = dedupe_table_ids(xml, _rng=random.Random(0))
+        ids = [int(v) for v in re.findall(r'a16:colId[^v]*val="(\d+)"', out)]
+        assert len(set(ids)) == 2
+
+    def test_dedup_is_scoped_per_table(self):
+        # Same id in two different tables should NOT be regenerated.
+        xml = (
+            "<a:tbl>" + _row(7) + "</a:tbl>"
+            "<a:tbl>" + _row(7) + "</a:tbl>"
+        )
+        out = dedupe_table_ids(xml)
+        assert out == xml
 
 
 class TestCleanJinjaDelimiters:
