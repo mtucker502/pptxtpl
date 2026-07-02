@@ -196,6 +196,52 @@ Slide {{ loop.index }} of {{ loop.length }}
 
 If the list is empty, all template slides in the group are removed. Multiple slide loops (single or multi-slide) in one presentation work independently.
 
+### Nested slide loops
+
+Slide loops nest: place one `{%slide for %}` range inside another. Inner
+iterables are evaluated per outer iteration, so they can reference the outer
+loop variable. Each slide is cloned with the full context of every loop it
+sits inside.
+
+```
+Slide 1: {%slide for region in regions %}   Region: {{ region.name }}
+Slide 2: {%slide for city in region.cities %}
+         City: {{ city.name }} in {{ region.name }}
+         {%slide endfor %}
+Slide 3: End of {{ region.name }}           {%slide endfor %}
+```
+
+```python
+tpl.render({
+    "regions": [
+        {"name": "West", "cities": [{"name": "SF"}, {"name": "LA"}]},
+        {"name": "East", "cities": [{"name": "NYC"}]},
+    ],
+})
+# → 7 slides: West, SF, LA, End of West, East, NYC, End of East
+```
+
+`loop` always refers to the innermost enclosing slide loop. Empty inner
+iterables skip only the inner slides for that iteration. Sibling loops
+cannot share a slide (a slide is cloned as a unit).
+
+### Named loop helpers
+
+Add `as name` to bind a loop's helper under a stable name. Named helpers
+are visible on every slide inside the loop — including nested loops — and,
+unlike `loop`, are not shadowed by inline `{% for %}` loops.
+
+```
+{%slide for region in regions as regionloop %}
+{%slide for city in region.cities as cityloop %}
+City {{ cityloop.index }}/{{ cityloop.length }} of region {{ regionloop.index }}
+{%slide endfor %}
+{%slide endfor %}
+```
+
+Naming a helper `loop` or the same as the loop variable raises
+`InvalidTemplateError`.
+
 ## Conditional slides
 
 Use `{%slide if %}` to conditionally include or exclude entire slides based on the render context. Place the tags anywhere on the slide — they're stripped before rendering.
