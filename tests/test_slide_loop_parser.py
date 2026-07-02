@@ -267,3 +267,28 @@ class TestExpandLoopTree:
         out = expand_loop_tree(roots[0], _eval({"xs": ["a", "b"]}))
         out[0][1]["mutated"] = True
         assert "mutated" not in out[1][1]
+
+    def test_two_sibling_children_under_one_outer(self):
+        # slides: 0=outer for, 1-2=first inner loop, 3=outer-only,
+        # 4-5=second inner loop, 6=outer endfor
+        roots = parse_loop_tree([
+            [("for", ["r"], "regions", None)],
+            [("for", ["c"], "r.cities", None)],
+            [("endfor",)],
+            [],
+            [("for", ["s"], "r.sites", None)],
+            [("endfor",)],
+            [("endfor",)],
+        ])
+        regions = [{"cities": ["SF", "LA"], "sites": ["hq"]}]
+        out = expand_loop_tree(roots[0], _eval({"regions": regions}))
+        # slide 0 (outer), cities: 1,2 twice, slide 3 (outer),
+        # sites: 4,5 once, slide 6 (outer)
+        assert [i for i, _ in out] == [0, 1, 2, 1, 2, 3, 4, 5, 6]
+        # first inner loop ctx has c; second has s; both keep r
+        assert out[1][1]["c"] == "SF"
+        assert out[3][1]["c"] == "LA"
+        assert out[6][1]["s"] == "hq"
+        assert out[6][1]["r"]["sites"] == ["hq"]
+        # outer-only slides carry the outer loop helper
+        assert out[5][1]["loop"]["length"] == 1
