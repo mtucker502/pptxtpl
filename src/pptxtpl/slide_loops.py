@@ -112,3 +112,58 @@ def parse_loop_tree(per_slide_events):
             "matching {%slide endfor%}"
         )
     return roots
+
+
+def expand_loop_tree(node, eval_iterable, parent_ctx=None):
+    """Expand one loop node into an ordered clone sequence.
+
+    Returns a list of ``(source_slide_index, ctx)`` pairs.  ``ctx`` holds
+    the loop variable bindings for the whole path, every `as`-named helper
+    on the path, and ``"loop"`` = the innermost helper dict.
+
+    ``eval_iterable(expr, path_ctx)`` evaluates a Jinja iterable expression
+    against the accumulated path context (merged with the render context by
+    the caller), so inner iterables like ``region.cities`` resolve per
+    outer iteration.
+    """
+    if parent_ctx is None:
+        parent_ctx = {}
+
+    items = eval_iterable(node.iterable_expr, parent_ctx)
+    out = []
+    n_items = len(items)
+
+    for item_idx, item in enumerate(items):
+        ctx = dict(parent_ctx)
+
+        if len(node.var_names) == 1:
+            ctx[node.var_names[0]] = item
+        else:
+            for var_name, val in zip(node.var_names, item):
+                ctx[var_name] = val
+
+        helper = {
+            "index": item_idx + 1,
+            "index0": item_idx,
+            "first": item_idx == 0,
+            "last": item_idx == n_items - 1,
+            "length": n_items,
+        }
+        ctx["loop"] = helper
+        if node.helper_name:
+            ctx[node.helper_name] = helper
+
+        # Walk the node's slide range; slides inside a child belong to the
+        # child (innermost wins), everything else is emitted at this level.
+        i = node.start
+        for child in node.children:
+            while i < child.start:
+                out.append((i, dict(ctx)))
+                i += 1
+            out.extend(expand_loop_tree(child, eval_iterable, ctx))
+            i = child.end + 1
+        while i <= node.end:
+            out.append((i, dict(ctx)))
+            i += 1
+
+    return out

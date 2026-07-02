@@ -8,6 +8,7 @@ from pptxtpl.slide_loops import (
     SLIDE_ENDFOR_RE,
     scan_slide_tags,
     parse_loop_tree,
+    expand_loop_tree,
 )
 
 
@@ -144,3 +145,125 @@ class TestParseLoopTree:
     def test_helper_colliding_with_var_raises(self):
         with pytest.raises(InvalidTemplateError):
             parse_loop_tree([[("for", ["x"], "xs", "x"), ("endfor",)]])
+
+
+def _eval(data):
+    """Build an eval_iterable callback over a dict of iterables.
+
+    Expressions of the form "name" look up data[name]; expressions of the
+    form "var.attr" look up path_ctx[var][attr] — enough to exercise lazy
+    per-iteration evaluation without Jinja.
+    """
+    def eval_iterable(expr, path_ctx):
+        if "." in expr:
+            var, attr = expr.split(".", 1)
+            return list(path_ctx[var][attr])
+        return list(data[expr])
+    return eval_iterable
+
+
+class TestExpandLoopTree:
+    def test_single_slide_loop(self):
+        roots = parse_loop_tree([[("for", ["x"], "xs", None), ("endfor",)]])
+        out = expand_loop_tree(roots[0], _eval({"xs": ["a", "b"]}))
+        assert [(i, c["x"]) for i, c in out] == [(0, "a"), (0, "b")]
+        assert out[0][1]["loop"] == {
+            "index": 1, "index0": 0, "first": True, "last": False, "length": 2,
+        }
+        assert out[1][1]["loop"]["last"] is True
+
+    def test_multi_slide_group(self):
+        roots = parse_loop_tree(
+            [[("for", ["x"], "xs", None)], [], [("endfor",)]]
+        )
+        out = expand_loop_tree(roots[0], _eval({"xs": ["a", "b"]}))
+        # Both items produce the full 3-slide group, in order
+        assert [i for i, _ in out] == [0, 1, 2, 0, 1, 2]
+        assert out[0][1]["x"] == "a"
+        assert out[3][1]["x"] == "b"
+
+    def test_nested_cartesian_expansion(self):
+        # slides: 0=outer for, 1=inner for, 2=inner endfor, 3=outer endfor
+        roots = parse_loop_tree([
+            [("for", ["r"], "regions", "rloop")],
+            [("for", ["c"], "r.cities", None)],
+            [("endfor",)],
+            [("endfor",)],
+        ])
+        regions = [
+            {"name": "West", "cities": ["SF", "LA"]},
+            {"name": "East", "cities": ["NYC"]},
+        ]
+        out = expand_loop_tree(roots[0], _eval({"regions": regions}))
+        # Per region: slide 0 (outer-only), then per city: slides 1,2,
+        # then slide 3 (outer-only)
+        assert [i for i, _ in out] == [0, 1, 2, 1, 2, 3, 0, 1, 2, 3]
+        # Inner slide contexts carry both region and city
+        first_inner = out[1][1]
+        assert first_inner["r"]["name"] == "West"
+        assert first_inner["c"] == "SF"
+        # loop = innermost (city loop)
+        assert first_inner["loop"]["length"] == 2
+        # Named outer helper reachable from inner slide
+        assert first_inner["rloop"]["index"] == 1
+        # Outer-only slide has loop = outer helper
+        assert out[0][1]["loop"]["length"] == 2
+        assert out[0][1]["loop"] is out[0][1]["rloop"]
+        # Second region: inner loop has 1 city
+        second_region_inner = out[7][1]
+        assert second_region_inner["c"] == "NYC"
+        assert second_region_inner["rloop"]["index"] == 2
+        assert second_region_inner["loop"]["length"] == 1
+
+    def test_empty_inner_prunes_subtree(self):
+        roots = parse_loop_tree([
+            [("for", ["r"], "regions", None)],
+            [("for", ["c"], "r.cities", None)],
+            [("endfor",)],
+            [("endfor",)],
+        ])
+        regions = [{"cities": []}, {"cities": ["X"]}]
+        out = expand_loop_tree(roots[0], _eval({"regions": regions}))
+        # Region 1: only outer slides 0,3; region 2: full expansion
+        assert [i for i, _ in out] == [0, 3, 0, 1, 2, 3]
+
+    def test_empty_outer_emits_nothing(self):
+        roots = parse_loop_tree(
+            [[("for", ["x"], "xs", None), ("endfor",)]]
+        )
+        assert expand_loop_tree(roots[0], _eval({"xs": []})) == []
+
+    def test_multi_var_unpacking(self):
+        roots = parse_loop_tree(
+            [[("for", ["k", "v"], "pairs", None), ("endfor",)]]
+        )
+        out = expand_loop_tree(
+            roots[0], _eval({"pairs": [("a", 1), ("b", 2)]})
+        )
+        assert out[0][1]["k"] == "a"
+        assert out[0][1]["v"] == 1
+        assert out[1][1]["k"] == "b"
+
+    def test_three_level_nesting(self):
+        roots = parse_loop_tree([
+            [("for", ["a"], "As", "aloop"),
+             ("for", ["b"], "a.Bs", "bloop"),
+             ("for", ["c"], "b.Cs", None),
+             ("endfor",), ("endfor",), ("endfor",)],
+        ])
+        As = [{"Bs": [{"Cs": ["x", "y"]}]}]
+        out = expand_loop_tree(roots[0], _eval({"As": As}))
+        assert len(out) == 2  # two leaf emissions, all on slide 0
+        ctx = out[1][1]
+        assert ctx["c"] == "y"
+        assert ctx["aloop"]["index"] == 1
+        assert ctx["bloop"]["index"] == 1
+        assert ctx["loop"]["index"] == 2
+
+    def test_contexts_are_independent_copies(self):
+        roots = parse_loop_tree(
+            [[("for", ["x"], "xs", None), ("endfor",)]]
+        )
+        out = expand_loop_tree(roots[0], _eval({"xs": ["a", "b"]}))
+        out[0][1]["mutated"] = True
+        assert "mutated" not in out[1][1]
