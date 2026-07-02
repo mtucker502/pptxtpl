@@ -188,3 +188,157 @@ class TestNestedErrors:
         tpl = PptxTemplate(path)
         with pytest.raises(InvalidTemplateError):
             tpl.render({"xs": [{"show": True, "name": "A"}]})
+
+
+class TestNamedLoopHelpers:
+    def test_named_helpers_across_nesting(self, tmp_dir):
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for region in regions as regionloop %}",
+            "Region {{ regionloop.index }}/{{ regionloop.length }}",
+        )
+        _add_slide(
+            prs,
+            "{%slide for city in region.cities as cityloop %}",
+            "City {{ cityloop.index }}/{{ cityloop.length }}"
+            " of region {{ regionloop.index }}",
+            "{%slide endfor %}",
+        )
+        _add_slide(prs, "{%slide endfor %}")
+        path = os.path.join(tmp_dir, "named.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        tpl.render({"regions": REGIONS})
+        output = os.path.join(tmp_dir, "out.pptx")
+        tpl.save(output)
+
+        texts = [_get_slide_text(s) for s in Presentation(output).slides]
+        # West: header, SF, LA, endfor-slide; East: header, NYC, endfor-slide
+        assert "Region 1/2" in texts[0]
+        assert "City 1/2 of region 1" in texts[1]
+        assert "City 2/2 of region 1" in texts[2]
+        assert "Region 2/2" in texts[4]
+        assert "City 1/1 of region 2" in texts[5]
+
+    def test_loop_refers_to_innermost(self, tmp_dir):
+        prs = Presentation()
+        _add_slide(prs, "{%slide for r in regions as rloop %}",
+                   "outer loop.index={{ loop.index }}")
+        _add_slide(
+            prs,
+            "{%slide for c in r.cities %}"
+            "inner loop.index={{ loop.index }} rloop={{ rloop.index }}"
+            "{%slide endfor %}",
+        )
+        _add_slide(prs, "{%slide endfor %}")
+        path = os.path.join(tmp_dir, "innermost.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        tpl.render({"regions": REGIONS})
+        output = os.path.join(tmp_dir, "out.pptx")
+        tpl.save(output)
+
+        texts = [_get_slide_text(s) for s in Presentation(output).slides]
+        assert "outer loop.index=1" in texts[0]
+        assert "inner loop.index=2 rloop=1" in texts[2]  # LA slide
+
+    def test_named_helper_not_shadowed_by_inline_for(self, tmp_dir):
+        """Inline Jinja {% for %} shadows `loop` but not a named helper."""
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for jsa in jsas as jsaloop %}"
+            "{% for p in jsa.products %}"
+            "[{{ loop.index }}:{{ jsaloop.index }}:{{ p }}]"
+            "{% endfor %}"
+            "{%slide endfor %}",
+        )
+        path = os.path.join(tmp_dir, "shadow.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        tpl.render({
+            "jsas": [
+                {"products": ["a", "b"]},
+                {"products": ["c"]},
+            ],
+        })
+        output = os.path.join(tmp_dir, "out.pptx")
+        tpl.save(output)
+
+        texts = [_get_slide_text(s) for s in Presentation(output).slides]
+        # inline loop.index counts products; jsaloop.index counts slides
+        assert "[1:1:a]" in texts[0]
+        assert "[2:1:b]" in texts[0]
+        assert "[1:2:c]" in texts[1]
+
+    def test_single_level_loop_with_as(self, tmp_dir):
+        """`as name` works without nesting too."""
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for x in xs as xloop %}"
+            "{{ x }} ({{ xloop.index }} of {{ xloop.length }})"
+            "{%slide endfor %}",
+        )
+        path = os.path.join(tmp_dir, "flat_as.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        tpl.render({"xs": ["A", "B"]})
+        output = os.path.join(tmp_dir, "out.pptx")
+        tpl.save(output)
+
+        texts = [_get_slide_text(s) for s in Presentation(output).slides]
+        assert "A (1 of 2)" in texts[0]
+        assert "B (2 of 2)" in texts[1]
+
+
+class TestNamedHelperErrors:
+    def test_helper_named_loop_raises(self, tmp_dir):
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for x in xs as loop %}{{ x }}{%slide endfor %}",
+        )
+        path = os.path.join(tmp_dir, "bad_name.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        with pytest.raises(InvalidTemplateError):
+            tpl.render({"xs": [1]})
+
+    def test_helper_colliding_with_var_raises(self, tmp_dir):
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for x in xs as x %}{{ x }}{%slide endfor %}",
+        )
+        path = os.path.join(tmp_dir, "collide.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        with pytest.raises(InvalidTemplateError):
+            tpl.render({"xs": [1]})
+
+
+class TestUndeclaredVariablesWithAs:
+    def test_as_tag_is_stripped_for_variable_discovery(self, tmp_dir):
+        """get_undeclared_template_variables must not choke on `as name`."""
+        prs = Presentation()
+        _add_slide(
+            prs,
+            "{%slide for x in xs as xloop %}"
+            "{{ x }} {{ xloop.index }}"
+            "{%slide endfor %}",
+        )
+        path = os.path.join(tmp_dir, "vars.pptx")
+        prs.save(path)
+
+        tpl = PptxTemplate(path)
+        variables = tpl.get_undeclared_template_variables()
+        # Discovery is approximate (tags are stripped), but it must not raise
+        assert isinstance(variables, set)
