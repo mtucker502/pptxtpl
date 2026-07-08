@@ -15,18 +15,18 @@ from pptx.oxml.ns import qn
 from pptxtpl.xml_utils import preprocess_xml, dedupe_table_ids
 from pptxtpl.richtext import RichText, Listing
 from pptxtpl.slide_ops import clone_slide, _drop_slide_owned_rels
+from pptxtpl.slide_loops import (
+    SLIDE_FOR_RE as _SLIDE_FOR_RE,
+    SLIDE_ENDFOR_RE as _SLIDE_ENDFOR_RE,
+    scan_slide_tags,
+    parse_loop_tree,
+    expand_loop_tree,
+)
 from pptxtpl.exceptions import TemplateRenderError, InvalidTemplateError
 
 
 # Regex for Jinja tags used to discover undeclared variables
 _JINJA_TAG_RE = re.compile(r"(\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\})", re.DOTALL)
-
-# Slide-level loop tags: {%slide for VAR in EXPR %} and {%slide endfor %}
-_SLIDE_FOR_RE = re.compile(
-    r"\{%-?\s*slide\s+for\s+(\w+(?:\s*,\s*\w+)*)\s+in\s+(.*?)\s*-?%\}",
-    re.DOTALL,
-)
-_SLIDE_ENDFOR_RE = re.compile(r"\{%-?\s*slide\s+endfor\s*-?%\}")
 
 # Slide-level conditional tags: {%slide if EXPR %} and {%slide endif %}
 _SLIDE_IF_RE = re.compile(
@@ -100,17 +100,25 @@ class PptxTemplate:
         # - Plain strings → XML-escaped to prevent invalid XML after rendering
         render_context = {k: _escape_value(v) for k, v in context.items()}
 
+        # Parse the slide-loop tree once; validation errors (unbalanced or
+        # sibling-sharing tags) surface here before any slides are touched.
+        loop_roots = self._parse_loop_roots()
+
+        # Validate that no {%slide if%} appears inside a {%slide for%} range,
+        # which has undefined semantics (the if is evaluated against the
+        # original context, not per-iteration).  This must run before Phase 1
+        # below: a {%slide if%} referencing a not-yet-bound loop variable
+        # (e.g. an inner if using the outer loop's variable) would otherwise
+        # blow up evaluating the condition instead of reporting the real,
+        # actionable error.
+        self._validate_no_if_inside_for(loop_roots)
+
         # Phase 1: Identify conditional slides to remove (defer actual removal
         # so that sldIdLst length stays stable for slide-loop partname generation)
         cond_removals = self._find_false_conditional_slides(render_context, jinja_env)
 
-        # Validate that no {%slide if%} appears inside a {%slide for%} range,
-        # which has undefined semantics (the if is evaluated against the
-        # original context, not per-iteration).
-        self._validate_no_if_inside_for()
-
         # Phase 2: Expand slide-level loops (clones slides, modifies slide list)
-        rid_contexts = self._expand_slide_loops(render_context, jinja_env)
+        rid_contexts = self._expand_slide_loops(loop_roots, render_context, jinja_env)
 
         # Phase 3: Remove false conditional slides now that cloning is done
         sldIdLst = self._prs.slides._sldIdLst
@@ -124,30 +132,6 @@ class PptxTemplate:
             if rId in rid_contexts:
                 ctx.update(rid_contexts[rId])
             self._render_slide(slide, ctx, jinja_env)
-
-    def _validate_no_if_inside_for(self) -> None:
-        """Raise if any {%slide if%} appears inside a {%slide for%} range."""
-        for_ranges: list[tuple[int, int]] = []
-        if_indices: list[int] = []
-        open_for: int | None = None
-        for i, slide in enumerate(self._prs.slides):
-            xml_str = etree.tostring(slide._element, encoding="unicode")
-            xml_str = preprocess_xml(xml_str)
-            if _SLIDE_FOR_RE.search(xml_str):
-                open_for = i
-            if _SLIDE_IF_RE.search(xml_str):
-                if_indices.append(i)
-            if _SLIDE_ENDFOR_RE.search(xml_str):
-                if open_for is not None:
-                    for_ranges.append((open_for, i))
-                    open_for = None
-        for idx in if_indices:
-            for start, end in for_ranges:
-                if start <= idx <= end:
-                    raise InvalidTemplateError(
-                        "{%slide if%} cannot appear on a slide inside a "
-                        "{%slide for%} ... endfor range"
-                    )
 
     def _drop_slide_by_rid(self, sldIdLst, sldId, rId) -> None:
         """Remove a slide and clean up parts it owned (e.g. notesSlide).
@@ -163,6 +147,31 @@ class PptxTemplate:
             _drop_slide_owned_rels(slide_part)
         sldIdLst.remove(sldId)
         self._prs.part.drop_rel(rId)
+
+    def _parse_loop_roots(self):
+        """Scan all slides for {%slide for/endfor%} tags and parse the tree."""
+        per_slide_events = []
+        for slide in self._prs.slides:
+            xml_str = etree.tostring(slide._element, encoding="unicode")
+            xml_str = preprocess_xml(xml_str)
+            per_slide_events.append(scan_slide_tags(xml_str))
+        return parse_loop_tree(per_slide_events)
+
+    def _validate_no_if_inside_for(self, loop_roots) -> None:
+        """Raise if any {%slide if%} appears inside a {%slide for%} range."""
+        if_indices: list[int] = []
+        for i, slide in enumerate(self._prs.slides):
+            xml_str = etree.tostring(slide._element, encoding="unicode")
+            xml_str = preprocess_xml(xml_str)
+            if _SLIDE_IF_RE.search(xml_str):
+                if_indices.append(i)
+        for idx in if_indices:
+            for root in loop_roots:
+                if root.start <= idx <= root.end:
+                    raise InvalidTemplateError(
+                        "{%slide if%} cannot appear on a slide inside a "
+                        "{%slide for%} ... endfor range"
+                    )
 
     def _find_false_conditional_slides(
         self, context: dict, jinja_env: Environment
@@ -201,53 +210,36 @@ class PptxTemplate:
 
         return removals
 
-    def _expand_slide_loops(self, context: dict, jinja_env: Environment) -> dict:
-        """Detect {%slide for%}/{%slide endfor%} tags and expand slides.
+    def _expand_slide_loops(
+        self, loop_roots, context: dict, jinja_env: Environment
+    ) -> dict:
+        """Expand {%slide for%} loop trees into cloned slides.
 
-        Supports both single-slide loops (both tags on one slide) and
-        multi-slide loops (for-tag on one slide, endfor on a later slide).
-        All slides in the range are cloned as a group per iteration.
+        Supports single-slide loops, multi-slide groups, and nested loops
+        (a slide loop whose range sits inside another loop's range).  Each
+        root tree expands to a flat clone sequence via expand_loop_tree;
+        inner iterables are evaluated lazily against the accumulated path
+        context, so ``{%slide for c in region.cities %}`` sees the current
+        ``region``.
 
-        Returns a dict mapping rId → per-slide context overrides
-        (the loop variable and a ``loop`` helper with index/first/last/length).
+        Returns a dict mapping rId → per-slide context overrides (loop
+        variables, `as`-named helpers, and a ``loop`` helper for the
+        innermost loop with index/first/last/length).
         """
-        # First pass: find for/endfor tag locations across all slides
-        for_tags: list[tuple] = []   # (slide_idx, var_names_str, iterable_expr)
-        endfor_indices: list[int] = []
-
-        for i, slide in enumerate(self._prs.slides):
-            xml_str = etree.tostring(slide._element, encoding="unicode")
-            xml_str = preprocess_xml(xml_str)
-            match = _SLIDE_FOR_RE.search(xml_str)
-            if match:
-                for_tags.append((i, match.group(1).strip(), match.group(2).strip()))
-            if _SLIDE_ENDFOR_RE.search(xml_str):
-                endfor_indices.append(i)
-
-        if not for_tags:
+        if not loop_roots:
             return {}
 
-        if len(for_tags) != len(endfor_indices):
-            raise InvalidTemplateError(
-                f"Mismatched slide loop tags: {len(for_tags)} {{%slide for%}} "
-                f"and {len(endfor_indices)} {{%slide endfor%}} tags"
-            )
-
-        # Pair for/endfor tags sequentially and validate
-        expansions: list[tuple] = []
-        for (start_idx, var_names, expr), end_idx in zip(for_tags, endfor_indices):
-            if end_idx < start_idx:
-                raise InvalidTemplateError(
-                    f"{{%slide endfor%}} on slide {end_idx + 1} appears before "
-                    f"{{%slide for%}} on slide {start_idx + 1}"
-                )
-            expansions.append((start_idx, end_idx, var_names, expr))
-
-        for i in range(len(expansions) - 1):
-            if expansions[i][1] >= expansions[i + 1][0]:
-                raise InvalidTemplateError(
-                    "Overlapping slide loop ranges are not supported"
-                )
+        def eval_iterable(expr, path_ctx):
+            # Items come from render_context which is already recursively
+            # XML-escaped by render(); don't double-escape.
+            merged = {**context, **path_ctx}
+            try:
+                expr_fn = jinja_env.compile_expression(expr)
+                return list(expr_fn(**merged))
+            except Exception as exc:
+                raise TemplateRenderError(
+                    f"Cannot evaluate slide loop iterable '{expr}': {exc}"
+                ) from exc
 
         # Map context by rId so indices stay correct across multiple expansions
         rid_context: dict[str, dict] = {}
@@ -259,46 +251,31 @@ class PptxTemplate:
         deferred_removals: list[tuple] = []  # (template_sldId, rId)
 
         # Process in reverse order so that earlier indices remain valid
-        for start_idx, end_idx, var_names_str, iterable_expr in reversed(expansions):
-            # Evaluate the iterable expression using Jinja2
-            try:
-                expr_fn = jinja_env.compile_expression(iterable_expr)
-                items = list(expr_fn(**context))
-            except Exception as exc:
-                raise TemplateRenderError(
-                    f"Cannot evaluate slide loop iterable '{iterable_expr}': {exc}"
-                ) from exc
+        for root in reversed(loop_roots):
+            emissions = expand_loop_tree(root, eval_iterable)
 
-            group_size = end_idx - start_idx + 1
-
-            # Collect template sldIds for all slides in the group
+            # Collect template sldIds for all slides in the root range
             template_sldIds: list[tuple] = []
-            for offset in range(group_size):
-                sldId = sldIdLst[start_idx + offset]
+            for idx in range(root.start, root.end + 1):
+                sldId = sldIdLst[idx]
                 rId = sldId.get(qn("r:id"))
                 template_sldIds.append((sldId, rId))
 
-            if not items:
+            if not emissions:
                 deferred_removals.extend(template_sldIds)
                 continue
 
-            # Get source slides for the entire group
-            source_slides = [
-                self._prs.slides[start_idx + offset]
-                for offset in range(group_size)
-            ]
-
-            # Clone all slides: for each item, clone every slide in the group.
-            # Do NOT touch sldIdLst between clones, because add_slide uses
-            # len(prs.slides) to generate unique part names.
+            # Clone slides in emission order.  Do NOT touch sldIdLst between
+            # clones, because add_slide uses len(prs.slides) to generate
+            # unique part names.
             n_before = len(list(sldIdLst))
-            for _ in items:
-                for source_slide in source_slides:
-                    clone_slide(self._prs, source_slide)
+            for slide_idx, _ctx in emissions:
+                clone_slide(self._prs, self._prs.slides[slide_idx])
 
             # Collect the clone sldIds (they were appended at the end)
-            n_clones = len(items) * group_size
-            clone_sldIds = [sldIdLst[n_before + i] for i in range(n_clones)]
+            clone_sldIds = [
+                sldIdLst[n_before + i] for i in range(len(emissions))
+            ]
 
             # Remove clones from the end of sldIdLst
             for sldId in reversed(clone_sldIds):
@@ -312,36 +289,10 @@ class PptxTemplate:
             # Mark all template slides for deferred removal
             deferred_removals.extend(template_sldIds)
 
-            # Store per-slide context keyed by rId
-            var_list = [v.strip() for v in var_names_str.split(",")]
-            n_items = len(items)
-            for item_idx, item in enumerate(items):
-                # Items come from render_context which is already
-                # recursively XML-escaped by render(); don't double-escape.
-                ctx: dict = {}
-
-                if len(var_list) == 1:
-                    ctx[var_list[0]] = item
-                else:
-                    for var_name, val in zip(var_list, item):
-                        ctx[var_name] = val
-
-                # Provide a loop helper (mirrors Jinja2's loop variable)
-                ctx["loop"] = {
-                    "index": item_idx + 1,
-                    "index0": item_idx,
-                    "first": item_idx == 0,
-                    "last": item_idx == n_items - 1,
-                    "length": n_items,
-                }
-
-                # Apply same context to every slide in this iteration's group
-                for offset in range(group_size):
-                    clone_idx = item_idx * group_size + offset
-                    clone_rId = clone_sldIds[clone_idx].get(qn("r:id"))
-                    # Defensive copy: each slide owns its own context dict
-                    # so later mutations on one slide can't affect siblings.
-                    rid_context[clone_rId] = dict(ctx)
+            # Store per-slide context keyed by rId.  expand_loop_tree already
+            # returns an independent dict per emission.
+            for (slide_idx, ctx), clone_sldId in zip(emissions, clone_sldIds):
+                rid_context[clone_sldId.get(qn("r:id"))] = ctx
 
         # Now remove all template slides and drop their relationships
         for template_sldId, rId in deferred_removals:
@@ -361,11 +312,15 @@ class PptxTemplate:
         xml_str = preprocess_xml(xml_str)
 
         # Strip slide-level loop tags (already handled by _expand_slide_loops)
-        xml_str = _strip_slide_tags(xml_str)
+        stripped_xml_str = _strip_slide_tags(xml_str)
 
-        # Check if there are any Jinja tags after preprocessing
-        if not _JINJA_TAG_RE.search(xml_str):
+        # Bail out only if nothing changed AND no Jinja tags remain. A slide
+        # holding only {%slide for/endfor/if/endif%} tags (no other Jinja
+        # markup) still needs the stripped text committed below, or the
+        # literal tag text leaks into the rendered output.
+        if stripped_xml_str == xml_str and not _JINJA_TAG_RE.search(xml_str):
             return  # No templates on this slide
+        xml_str = stripped_xml_str
 
         # Render with Jinja2
         try:
