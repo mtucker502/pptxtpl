@@ -417,8 +417,24 @@ class PptxTemplate:
 
         return run_re.sub(_replace_run, xml)
 
-    def save(self, output_path: str) -> None:
-        """Save the rendered presentation to a file."""
+    def save(self, output_path: str, autofit: bool = False, **autofit_options) -> None:
+        """Save the rendered presentation to a file or file-like object.
+
+        Args:
+            output_path: Destination path or file-like object.
+            autofit: Shrink overflowing text to fit its shape. PowerPoint
+                stores the shrink factor in the file and only recalculates it
+                when text is edited, so rendered decks overflow until this is
+                applied. Requires the ``autofit`` extra (Pillow).
+            **autofit_options: Forwarded to
+                :func:`pptxtpl.autofit.fit_slide` -- ``uniform`` to scale each
+                slide by a single factor, plus ``default_size_pt``,
+                ``font_path`` and ``min_scale``.
+        """
+        if autofit:
+            from pptxtpl.autofit import fit_presentation
+
+            fit_presentation(self._prs, **autofit_options)
         self._prs.save(output_path)
 
     def get_undeclared_template_variables(

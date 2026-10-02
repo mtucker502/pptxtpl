@@ -15,6 +15,11 @@ dependencies = [
     "lxml",
 ]
 
+[project.optional-dependencies]
+autofit = [
+    "pillow>=10.1",
+]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: opt-in slow tests (set PPTXTPL_FUZZ=1 to run)",
