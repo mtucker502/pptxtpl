@@ -27,6 +27,7 @@ or directly against a ``python-pptx`` presentation::
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import NamedTuple
 
 from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
@@ -62,9 +63,6 @@ _WIDTH_SAFETY = 0.98
 # PowerPoint writes fontScale in 2.5% steps; match it so the value looks native.
 _SCALE_STEP = 0.025
 
-# Scales this close to 1.0 are not worth writing.
-_NO_SHRINK_THRESHOLD = 0.99
-
 # Chrome placeholders are positioned and sized by the master. Rescaling them
 # fights the template rather than helping it.
 _SKIP_PLACEHOLDERS = frozenset(
@@ -92,6 +90,7 @@ class AutofitError(PptxTemplateError):
     """Raised when autofit cannot run (for example, Pillow is missing)."""
 
 
+@lru_cache(maxsize=256)
 def _load_font(size_px: int, font_path: str | None):
     """Return a Pillow font object for measurement at ``size_px``."""
     try:
@@ -210,7 +209,13 @@ def _paragraph_size_pt(paragraph, default_pt: float) -> float:
     return default_pt
 
 
-def _wrapped_line_count(text: str, font, max_width_pt: float) -> int:
+@lru_cache(maxsize=65536)
+def _word_width(size_px: int, font_path: str | None, word: str) -> float:
+    """Width of one word in points, measured once per font size."""
+    return _load_font(size_px, font_path).getlength(word)
+
+
+def _wrapped_line_count(text: str, size_px: int, font_path: str | None, max_width_pt: float) -> int:
     """Count lines produced by wrapping ``text`` at ``max_width_pt``.
 
     Explicit line breaks are honoured before word wrapping. python-pptx renders
@@ -222,25 +227,35 @@ def _wrapped_line_count(text: str, font, max_width_pt: float) -> int:
         return 1
 
     return sum(
-        _wrapped_segment_count(segment, font, max_width_pt)
+        _wrapped_segment_count(segment, size_px, font_path, max_width_pt)
         for segment in text.replace("\v", "\n").split("\n")
     )
 
 
-def _wrapped_segment_count(text: str, font, max_width_pt: float) -> int:
-    """Count lines produced by greedy word wrapping of a single hard line."""
+def _wrapped_segment_count(
+    text: str, size_px: int, font_path: str | None, max_width_pt: float
+) -> int:
+    """Count lines produced by greedy word wrapping of a single hard line.
+
+    Each word is measured once and line widths are summed, rather than
+    re-measuring the growing line for every word: that was quadratic in the
+    words per line, and the binary search repeats the layout ~13 times.
+    """
     if not text.strip():
         return 1
 
+    space = _word_width(size_px, font_path, " ")
     lines = 0
-    current = ""
+    current: float | None = None  # width of the line being filled
     for word in text.split():
-        candidate = f"{current} {word}" if current else word
-        if not current or font.getlength(candidate) <= max_width_pt:
-            current = candidate
+        width = _word_width(size_px, font_path, word)
+        if current is None:
+            current = width
+        elif current + space + width <= max_width_pt:
+            current += space + width
         else:
             lines += 1
-            current = word
+            current = width
     return lines + 1
 
 
@@ -256,9 +271,8 @@ def _layout(
     line_count = 0
     for paragraph in text_frame.paragraphs:
         size_pt = _paragraph_size_pt(paragraph, default_pt) * scale
-        font = _load_font(int(round(size_pt)), font_path)
-        text = paragraph.text
-        lines = _wrapped_line_count(text, font, width_pt)
+        size_px = max(int(round(size_pt)), 1)
+        lines = _wrapped_line_count(paragraph.text, size_px, font_path, width_pt)
         line_count += lines
 
         line_spacing = paragraph.line_spacing
@@ -295,6 +309,24 @@ def _fits(
     """
     required, lines = _layout(text_frame, scale, default_pt, width_pt, font_path)
     return lines <= 1 or required <= height_pt
+
+
+def _apply_scale(text_frame, scale: float) -> None:
+    """Write a measured scale to a text frame.
+
+    Below 1.0 the frame's autofit setting is replaced with a precomputed
+    ``normAutofit``. At 1.0 the existing setting -- ``spAutoFit`` on a
+    python-pptx text box, a deliberate ``noAutofit`` -- is left alone, except
+    that a stale ``fontScale`` left over from the template's old text is
+    cleared so PowerPoint does not keep shrinking text that now fits.
+    """
+    if scale < 1.0:
+        _apply_norm_autofit(text_frame, scale, 0.1 if scale < 0.9 else 0.0)
+        return
+    existing = text_frame._txBody.bodyPr.find(qn("a:normAutofit"))
+    if existing is not None:
+        existing.attrib.pop("fontScale", None)
+        existing.attrib.pop("lnSpcReduction", None)
 
 
 def _apply_norm_autofit(text_frame, font_scale: float, lnspc_reduction: float) -> None:
@@ -386,7 +418,7 @@ def fit_shape(
     scale = _measure_scale(shape, default_size_pt, font_path, min_scale)
     if scale is None:
         return None
-    _apply_norm_autofit(shape.text_frame, scale, 0.1 if scale < 0.9 else 0.0)
+    _apply_scale(shape.text_frame, scale)
     return scale
 
 
@@ -511,7 +543,7 @@ def fit_slide(
         applied = []
         for shape in shapes:
             scale = fit_shape(shape, **kwargs)
-            if scale is not None and scale < _NO_SHRINK_THRESHOLD:
+            if scale is not None and scale < 1.0:
                 applied.append((shape.name, scale))
         return applied
 
@@ -526,10 +558,8 @@ def fit_slide(
     slide_scale = min(scale for _, scale in measured)
     applied = []
     for shape, _ in measured:
-        _apply_norm_autofit(
-            shape.text_frame, slide_scale, 0.1 if slide_scale < 0.9 else 0.0
-        )
-        if slide_scale < _NO_SHRINK_THRESHOLD:
+        _apply_scale(shape.text_frame, slide_scale)
+        if slide_scale < 1.0:
             applied.append((shape.name, slide_scale))
     return applied
 

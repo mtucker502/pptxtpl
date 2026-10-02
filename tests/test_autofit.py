@@ -51,9 +51,7 @@ def test_short_text_is_not_shrunk():
     scale = fit_shape(box)
 
     assert scale == 1.0
-    node = _norm_autofit(box)
-    assert node is not None
-    assert node.get("fontScale") is None
+    assert _norm_autofit(box) is None
 
 
 def test_single_line_taller_than_its_box_is_not_shrunk():
@@ -66,7 +64,7 @@ def test_single_line_taller_than_its_box_is_not_shrunk():
     scale = fit_shape(box)
 
     assert scale == 1.0
-    assert _norm_autofit(box).get("fontScale") is None
+    assert _norm_autofit(box) is None
 
 
 def test_wrapping_text_in_a_short_box_is_shrunk():
@@ -268,3 +266,86 @@ def test_grow_requires_a_slide_height():
 
     with pytest.raises(PptxTemplateError):
         fit_slide(slide, grow=True)
+
+
+# --- review items 1 and 2 -------------------------------------------------
+
+
+def test_each_word_is_measured_once_per_size(monkeypatch):
+    # Re-measuring the whole growing line for every word is quadratic in the
+    # words per line, and the binary search repeats it ~13 times.
+    from PIL import ImageFont
+
+    calls = []
+    original = ImageFont.FreeTypeFont.getlength
+
+    def counting(self, text, *args, **kwargs):
+        calls.append(text)
+        return original(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageFont.FreeTypeFont, "getlength", counting)
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "lorem ipsum dolor sit amet " * 40, width_in=8, height_in=1)
+
+    assert fit_shape(box) < 1.0
+    # 5 distinct words + a space, at no more than 13 distinct sizes.
+    assert len(calls) <= 6 * 13
+
+
+def test_fitting_textbox_keeps_sp_autofit():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "Hi", width_in=8, height_in=3)
+    assert _body_pr(box).find(qn("a:spAutoFit")) is not None
+
+    assert fit_shape(box) == 1.0
+
+    assert _body_pr(box).find(qn("a:spAutoFit")) is not None
+    assert _norm_autofit(box) is None
+
+
+def test_fitting_shape_with_no_autofit_is_left_alone():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "Hi", width_in=8, height_in=3)
+    body_pr = _body_pr(box)
+    body_pr.remove(body_pr.find(qn("a:spAutoFit")))
+    body_pr.append(body_pr.makeelement(qn("a:noAutofit"), {}))
+
+    fit_shape(box)
+
+    assert body_pr.find(qn("a:noAutofit")) is not None
+    assert _norm_autofit(box) is None
+
+
+def test_stale_font_scale_is_cleared_when_text_now_fits():
+    # A template saved by PowerPoint may carry a fontScale from its old text.
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "Hi", width_in=8, height_in=3)
+    body_pr = _body_pr(box)
+    body_pr.remove(body_pr.find(qn("a:spAutoFit")))
+    body_pr.append(
+        body_pr.makeelement(qn("a:normAutofit"), {"fontScale": "62500", "lnSpcReduction": "10000"})
+    )
+
+    fit_shape(box)
+
+    node = _norm_autofit(box)
+    assert node is not None
+    assert node.get("fontScale") is None
+    assert node.get("lnSpcReduction") is None
+
+
+def test_uniform_leaves_fitting_shapes_autofit_alone_when_nothing_shrinks():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    a = _textbox(slide, "Hi", width_in=8, height_in=1)
+    b = _textbox(slide, "There", width_in=8, height_in=1)
+
+    assert fit_slide(slide, uniform=True) == []
+
+    assert _body_pr(a).find(qn("a:spAutoFit")) is not None
+    assert _body_pr(b).find(qn("a:spAutoFit")) is not None
