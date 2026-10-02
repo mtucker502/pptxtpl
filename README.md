@@ -372,7 +372,7 @@ By default each shape is scaled on its own, so a cramped title can end up much s
 tpl.save("output.pptx", autofit=True, grow=True, uniform=True)
 ```
 
-`grow=True` lets a shape expand downward into empty space *before* any shrinking, so a tight box is not what forces the font down. A long title in a 33pt frame with 20pt of clear space under it keeps a much larger font this way. Only top-anchored frames are moved, a shape never grows past whatever sits below it, and the new height is kept only if it actually buys a larger font.
+`grow=True` lets a shape expand downward into empty space *before* any shrinking, so a tight box is not what forces the font down. A long title in a 33pt frame with 20pt of clear space under it keeps a much larger font this way. Only top-anchored frames are moved (the anchor is resolved through the layout and master), a shape never grows past whatever sits below it on the slide, layout, or master, a 0.25in bottom margin is kept, and the new height is kept only if it actually buys a larger font. Shapes inside groups are shrunk but never grown.
 
 `uniform=True` scales every shape on a slide by the same factor — the smallest any one of them needs — so title and body keep their relative sizes.
 
