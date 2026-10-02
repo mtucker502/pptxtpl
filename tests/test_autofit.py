@@ -502,3 +502,138 @@ def test_insets_are_inherited_from_the_master():
         return fit_shape(body)
 
     assert body_scale(Inches(3)) < body_scale(Inches(0.1))
+
+
+# --- review items 5, 6 and 10 ------------------------------------------------
+
+
+def _tall_text(slide, left_in, top_in, width_in, height_in):
+    box = slide.shapes.add_textbox(Inches(left_in), Inches(top_in), Inches(width_in), Inches(height_in))
+    box.text_frame.word_wrap = True
+    box.text_frame.text = "word " * 40
+    for run in box.text_frame.paragraphs[0].runs:
+        run.font.size = Pt(18)
+    return box
+
+
+def test_grow_stops_at_layout_graphics():
+    prs = Presentation()
+    layout = prs.slide_layouts[6]
+    # LayoutShapes has no add_shape; build the logo on a slide and move it.
+    scratch = prs.slides.add_slide(layout)
+    logo = scratch.shapes.add_shape(1, Inches(0.5), Inches(3.0), Inches(6), Inches(0.5))
+    layout.shapes._spTree.append(logo._element)
+    slide = prs.slides.add_slide(layout)
+    box = _tall_text(slide, 0.5, 0.5, 6, 0.4)
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert box.height > Inches(0.4)
+    assert box.top + box.height <= Inches(3.0)
+
+
+def test_grow_stops_at_master_graphics():
+    prs = Presentation()
+    layout = prs.slide_layouts[6]
+    scratch = prs.slides.add_slide(layout)
+    rule = scratch.shapes.add_shape(1, Inches(0.5), Inches(3.0), Inches(6), Inches(0.1))
+    prs.slide_master.shapes._spTree.append(rule._element)
+    slide = prs.slides.add_slide(layout)
+    box = _tall_text(slide, 0.5, 0.5, 6, 0.4)
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert box.height > Inches(0.4)
+    assert box.top + box.height <= Inches(3.0)
+
+
+def test_grow_ignores_master_graphics_hidden_by_the_layout():
+    prs = Presentation()
+    layout = prs.slide_layouts[6]
+    layout._element.set("showMasterSp", "0")
+    scratch = prs.slides.add_slide(layout)
+    rule = scratch.shapes.add_shape(1, Inches(0.5), Inches(3.0), Inches(6), Inches(0.1))
+    prs.slide_master.shapes._spTree.append(rule._element)
+    slide = prs.slides.add_slide(layout)
+    box = _tall_text(slide, 0.5, 0.5, 6, 0.4)
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert box.top + box.height > Inches(3.0)
+
+
+def test_grow_ignores_layout_placeholders_as_obstacles():
+    # Layout placeholders are not rendered on the slide, so they cannot block.
+    prs = Presentation()
+    layout = prs.slide_layouts[1]  # body placeholder sits under the title
+    slide = prs.slides.add_slide(layout)
+    for ph in list(slide.placeholders):
+        ph._element.getparent().remove(ph._element)
+    box = _tall_text(slide, 0.5, 0.5, 6, 0.4)
+    body_top = next(p for p in layout.placeholders if p.placeholder_format.idx == 1).top
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert box.top + box.height > body_top
+
+
+def test_grow_leaves_a_bottom_margin():
+    from pptxtpl.autofit import GROW_BOTTOM_MARGIN_EMU
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _tall_text(slide, 0.5, 0.5, 6, 0.4)
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert box.top + box.height <= prs.slide_height - GROW_BOTTOM_MARGIN_EMU
+    assert box.top + box.height > prs.slide_height - 2 * GROW_BOTTOM_MARGIN_EMU
+
+
+def test_grow_does_not_touch_shapes_inside_groups():
+    # Group children live in the group's child coordinate space, which cannot
+    # be compared against slide-level obstacles.
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    group = slide.shapes.add_group_shape()
+    child = group.shapes.add_textbox(Inches(1), Inches(1), Inches(6), Inches(0.4))
+    child.text_frame.word_wrap = True
+    child.text_frame.text = "word " * 40
+    original_height = child.height
+
+    results = fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert child.height == original_height
+    assert results and results[0][0] == child.name  # still shrunk
+
+
+def test_grow_revert_does_not_pin_a_placeholder_xfrm():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    body = slide.placeholders[1]
+    body.text_frame.text = "\n".join(["word " * 60] * 40)  # cannot fit even when grown
+    assert body._element.spPr.find(qn("a:xfrm")) is None
+    original_height = body.height
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert body.height == original_height
+    assert body._element.spPr.find(qn("a:xfrm")) is None
+
+
+def test_word_wider_than_the_frame_wraps_mid_word():
+    from pptxtpl.autofit import _wrapped_segment_count, _word_width
+
+    word = "Supercalifragilisticexpialidocious" * 3
+    width = _word_width(18, None, word)
+
+    assert _wrapped_segment_count(word, 18, None, width / 4) >= 4
+    assert _wrapped_segment_count(word, 18, None, width * 2) == 1
+
+
+def test_overlong_url_in_a_short_box_is_shrunk():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "https://example.com/" + "segment/" * 40, width_in=3, height_in=0.5)
+
+    assert fit_shape(box) < 1.0

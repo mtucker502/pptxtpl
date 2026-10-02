@@ -34,7 +34,7 @@ from typing import NamedTuple
 from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.enum.text import MSO_ANCHOR
 from pptx.oxml.ns import qn
-from pptx.util import Emu, Length
+from pptx.util import Emu, Inches, Length
 
 from pptxtpl.exceptions import PptxTemplateError
 
@@ -74,6 +74,9 @@ _SKIP_PLACEHOLDERS = frozenset(
         PP_PLACEHOLDER.HEADER,
     }
 )
+
+# Clear space ``grow`` leaves between a grown shape and the slide's bottom edge.
+GROW_BOTTOM_MARGIN_EMU = Inches(0.25)
 
 # Default EMU insets python-pptx applies when a bodyPr omits them.
 _DEFAULT_INSET_PT = {"l": 7.2, "r": 7.2, "t": 3.6, "b": 3.6}
@@ -287,7 +290,16 @@ def _wrapped_segment_count(
     current: float | None = None  # width of the line being filled
     for word in text.split():
         width = _word_width(size_px, font_path, word)
-        if current is None:
+        if width > max_width_pt:
+            # PowerPoint breaks a token wider than the frame mid-word. Finish
+            # the current line, spend whole lines on the bulk of the word, and
+            # carry the remainder into a fresh line.
+            if current is not None:
+                lines += 1
+            full_lines = math.ceil(width / max_width_pt) - 1
+            lines += full_lines
+            current = width - full_lines * max_width_pt
+        elif current is None:
             current = width
         elif current + space + width <= max_width_pt:
             current += space + width
@@ -502,7 +514,7 @@ def _free_bottom_emu(shape, siblings, slide_height_emu: int) -> int:
         return slide_height_emu
 
     bottom, right = top + height, left + width
-    limit = slide_height_emu
+    limit = slide_height_emu - GROW_BOTTOM_MARGIN_EMU
     for other in siblings:
         if other is shape:
             continue
@@ -518,6 +530,23 @@ def _free_bottom_emu(shape, siblings, slide_height_emu: int) -> int:
             continue
         limit = min(limit, o_top)
     return limit
+
+
+def _inherited_graphics(slide) -> list:
+    """Layout and master shapes drawn on a slide: logos, rules, footer chrome.
+
+    Placeholders are excluded because a layout placeholder is not rendered on
+    the slide; only its slide-level copy is, and that is already an obstacle.
+    Master shapes are included unless the layout hides them.
+    """
+    layout = getattr(slide, "slide_layout", None)
+    if layout is None:
+        return []
+    graphics = [shape for shape in layout.shapes if not shape.is_placeholder]
+    if layout._element.get("showMasterSp") != "0":
+        master = layout.slide_master
+        graphics.extend(shape for shape in master.shapes if not shape.is_placeholder)
+    return graphics
 
 
 def _grow_to_fit(shape, siblings, slide_height_emu: int, options: dict) -> None:
@@ -551,10 +580,16 @@ def _grow_to_fit(shape, siblings, slide_height_emu: int, options: dict) -> None:
     # A placeholder may inherit its geometry from the layout, with no <a:xfrm>
     # of its own. Writing one dimension creates a partial xfrm and stops that
     # inheritance for the rest, leaving width unresolvable -- so pin all four.
+    sp_pr = shape._element.spPr
+    had_xfrm = sp_pr.find(qn("a:xfrm")) is not None
     shape.left, shape.top, shape.width = shape.left, shape.top, shape.width
     shape.height = grown
     if (_measure_scale(shape, **options) or 0) <= before:
-        shape.height = original
+        if had_xfrm:
+            shape.height = original
+        else:
+            # Restore inheritance rather than leaving a pinned copy behind.
+            sp_pr.remove(sp_pr.find(qn("a:xfrm")))
 
 
 def fit_slide(
@@ -593,9 +628,13 @@ def fit_slide(
     if grow:
         if slide_height_emu is None:
             raise AutofitError("grow requires slide_height_emu")
-        obstacles = list(slide.shapes)
-        for shape in shapes:
-            _grow_to_fit(shape, obstacles, slide_height_emu, options)
+        obstacles = list(slide.shapes) + _inherited_graphics(slide)
+        # Group children live in the group's own coordinate space and cannot
+        # be compared against slide-level obstacles, so only top-level shapes
+        # are grown. They are still shrunk below.
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                _grow_to_fit(shape, obstacles, slide_height_emu, options)
 
     if not uniform:
         applied = []
