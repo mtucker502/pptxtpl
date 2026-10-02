@@ -428,9 +428,16 @@ class PptxTemplate:
                 applied. Requires the ``autofit`` extra (Pillow).
             **autofit_options: Forwarded to
                 :func:`pptxtpl.autofit.fit_slide` -- ``uniform`` to scale each
-                slide by a single factor, plus ``default_size_pt``,
-                ``font_path`` and ``min_scale``.
+                slide by a single factor, ``grow`` to let shapes expand into
+                free space before shrinking, plus ``default_size_pt``,
+                ``font_path`` and ``min_scale``. Only valid with
+                ``autofit=True``.
         """
+        if autofit_options and not autofit:
+            raise TypeError(
+                "autofit options given without autofit=True: "
+                + ", ".join(sorted(autofit_options))
+            )
         if autofit:
             from pptxtpl.autofit import fit_presentation
 

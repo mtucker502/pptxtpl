@@ -27,6 +27,7 @@ or directly against a ``python-pptx`` presentation::
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -215,16 +216,23 @@ def _word_width(size_px: int, font_path: str | None, word: str) -> float:
     return _load_font(size_px, font_path).getlength(word)
 
 
-def _wrapped_line_count(text: str, size_px: int, font_path: str | None, max_width_pt: float) -> int:
+def _wrapped_line_count(
+    text: str, size_px: int, font_path: str | None, max_width_pt: float, wrap: bool = True
+) -> int:
     """Count lines produced by wrapping ``text`` at ``max_width_pt``.
 
     Explicit line breaks are honoured before word wrapping. python-pptx renders
     an ``<a:br/>`` as a vertical tab in ``paragraph.text``; a paragraph built
     only from ``run.text`` would silently lose every hard break it contains,
     which badly undercounts bulleted or address-style blocks.
+
+    With ``wrap`` false (``<a:bodyPr wrap="none">``) only hard breaks count.
     """
     if not text.strip():
         return 1
+
+    if not wrap:
+        return text.replace("\v", "\n").count("\n") + 1
 
     return sum(
         _wrapped_segment_count(segment, size_px, font_path, max_width_pt)
@@ -269,10 +277,11 @@ def _layout(
     """
     total = 0.0
     line_count = 0
+    wrap = text_frame.word_wrap is not False
     for paragraph in text_frame.paragraphs:
         size_pt = _paragraph_size_pt(paragraph, default_pt) * scale
         size_px = max(int(round(size_pt)), 1)
-        lines = _wrapped_line_count(paragraph.text, size_px, font_path, width_pt)
+        lines = _wrapped_line_count(paragraph.text, size_px, font_path, width_pt, wrap)
         line_count += lines
 
         line_spacing = paragraph.line_spacing
@@ -390,7 +399,16 @@ def _measure_scale(
             high = mid
 
     # Round down to PowerPoint's step so we never land back in overflow.
-    return max(int(low / _SCALE_STEP) * _SCALE_STEP, min_scale)
+    return max(_snap_down(low), min_scale)
+
+
+def _snap_down(scale: float) -> float:
+    """Round a scale down to PowerPoint's 2.5% step.
+
+    ``int(scale / step)`` alone drops an extra step on float error (0.3 / 0.025
+    is 11.999...), so the quotient is rounded before flooring.
+    """
+    return math.floor(round(scale / _SCALE_STEP, 6)) * _SCALE_STEP
 
 
 def fit_shape(

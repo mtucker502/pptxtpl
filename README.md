@@ -25,7 +25,7 @@ Optional extras:
 uv add "pptxtpl[autofit] @ git+https://github.com/mtucker502/pptxtpl.git"
 ```
 
-`autofit` pulls in Pillow, used to measure text so overflowing shapes can be shrunk to fit. See [Autofit](#autofit-shrink-text-on-overflow).
+`autofit` pins Pillow >= 10.1, whose bundled font is used to measure text so overflowing shapes can be shrunk to fit. python-pptx already depends on Pillow, so the extra only enforces the minimum version. See [Autofit](#autofit-shrink-text-on-overflow).
 
 ## Quick start
 
@@ -353,7 +353,7 @@ Rendered text is usually longer than the placeholder text it replaced, so it ove
 Pass `autofit=True` to compute and store that factor at save time:
 
 ```bash
-pip install "pptxtpl[autofit]"     # adds Pillow, used for text measurement
+pip install "pptxtpl[autofit]"     # Pillow >= 10.1, used for text measurement
 ```
 
 ```python

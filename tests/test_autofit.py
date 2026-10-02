@@ -128,13 +128,21 @@ def test_empty_and_sizeless_shapes_are_skipped():
 
 
 def test_footer_placeholders_are_skipped():
+    # python-pptx does not copy footer/slide-number placeholders onto a new
+    # slide, so clone one from the layout to have something to skip.
+    import copy
+
     prs = Presentation()
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    _textbox(slide, "word " * 300, width_in=3, height_in=1)
+    layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(layout)
+    footer_src = next(p for p in layout.placeholders if p.placeholder_format.idx == 11)
+    slide.shapes._spTree.append(copy.deepcopy(footer_src._element))
+    footer = next(p for p in slide.placeholders if p.placeholder_format.idx == 11)
+    footer.text_frame.text = "word " * 300
+    footer.width, footer.height = Inches(1), Inches(0.2)
 
-    results = fit_presentation(prs)
-
-    assert all("Footer" not in name and "Slide Number" not in name for _, name, _ in results)
+    assert fit_shape(footer) is None
+    assert fit_presentation(prs) == []
 
 
 def test_fit_presentation_reports_each_shrunk_shape():
@@ -349,3 +357,59 @@ def test_uniform_leaves_fitting_shapes_autofit_alone_when_nothing_shrinks():
 
     assert _body_pr(a).find(qn("a:spAutoFit")) is not None
     assert _body_pr(b).find(qn("a:spAutoFit")) is not None
+
+
+# --- review items 3, 4 and minors --------------------------------------------
+
+
+def test_unwrapped_frame_is_measured_as_one_line():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "word " * 20, width_in=3, height_in=0.5)
+    box.text_frame.word_wrap = False
+
+    assert fit_shape(box) == 1.0
+
+
+def test_unwrapped_frame_still_counts_hard_breaks():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = _textbox(slide, "line", width_in=8, height_in=0.5)
+    box.text_frame.word_wrap = False
+    paragraph = box.text_frame.paragraphs[0]
+    for _ in range(10):
+        paragraph.add_line_break()
+        run = paragraph.add_run()
+        run.text = "line"
+        run.font.size = Pt(18)
+
+    assert fit_shape(box) < 1.0
+
+
+def test_snap_down_is_immune_to_float_error():
+    from pptxtpl.autofit import _snap_down
+
+    assert _snap_down(0.3) == pytest.approx(0.3)
+    assert _snap_down(0.7) == pytest.approx(0.7)
+    assert _snap_down(0.31) == pytest.approx(0.3)
+    assert _snap_down(0.3249) == pytest.approx(0.3)
+
+
+def test_autofit_types_are_exported():
+    from pptxtpl import AutofitError, AutofitResult
+    from pptxtpl.exceptions import PptxTemplateError
+
+    assert issubclass(AutofitError, PptxTemplateError)
+    assert AutofitResult._fields == ("slide_index", "shape_name", "font_scale")
+
+
+def test_save_rejects_autofit_options_without_autofit(tmp_path):
+    from pptxtpl import PptxTemplate
+
+    template_path = tmp_path / "template.pptx"
+    Presentation().save(template_path)
+    tpl = PptxTemplate(str(template_path))
+    tpl.render({})
+
+    with pytest.raises(TypeError, match="autofit"):
+        tpl.save(str(tmp_path / "out.pptx"), uniform=True)
