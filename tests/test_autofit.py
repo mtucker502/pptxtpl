@@ -413,3 +413,92 @@ def test_save_rejects_autofit_options_without_autofit(tmp_path):
 
     with pytest.raises(TypeError, match="autofit"):
         tpl.save(str(tmp_path / "out.pptx"), uniform=True)
+
+
+# --- review items 7, 8, 9 and inset inheritance ------------------------------
+
+
+def _set_lvl_size(text_frame, level, sz):
+    from lxml import etree
+
+    lst = text_frame._txBody.find(qn("a:lstStyle"))
+    lvl = lst.find(qn(f"a:lvl{level + 1}pPr"))
+    if lvl is None:
+        lvl = etree.SubElement(lst, qn(f"a:lvl{level + 1}pPr"))
+    d = lvl.find(qn("a:defRPr"))
+    if d is None:
+        d = etree.SubElement(lvl, qn("a:defRPr"))
+    d.set("sz", str(sz))
+
+
+def test_layout_placeholder_is_matched_by_idx_not_type():
+    from pptxtpl.autofit import _inherited_size_pt
+
+    prs = Presentation()
+    layout = prs.slide_layouts[3]  # Two Content: idx 1 and 2 are both OBJECT
+    by_idx = {p.placeholder_format.idx: p for p in layout.placeholders}
+    _set_lvl_size(by_idx[1].text_frame, 0, 4000)
+    _set_lvl_size(by_idx[2].text_frame, 0, 1200)
+    slide = prs.slides.add_slide(layout)
+    on_slide = {p.placeholder_format.idx: p for p in slide.placeholders}
+
+    assert _inherited_size_pt(on_slide[1], 0, 18.0) == 40.0
+    assert _inherited_size_pt(on_slide[2], 0, 18.0) == 12.0
+
+
+def test_paragraph_level_selects_its_own_inherited_size():
+    from pptxtpl.autofit import _inherited_size_pt
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    body = slide.placeholders[1]
+
+    # Default template bodyStyle: lvl1 32pt, lvl2 28pt, lvl3 24pt.
+    assert _inherited_size_pt(body, 0, 18.0) == 32.0
+    assert _inherited_size_pt(body, 1, 18.0) == 28.0
+    assert _inherited_size_pt(body, 2, 18.0) == 24.0
+
+
+def test_indented_paragraphs_are_measured_at_their_level_size():
+    def body_with(level):
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        body = slide.placeholders[1]
+        body.text_frame.text = "word " * 60
+        for _ in range(6):
+            p = body.text_frame.add_paragraph()
+            p.text = "word " * 60
+        for p in body.text_frame.paragraphs:
+            p.level = level
+        return body
+
+    assert fit_shape(body_with(2)) > fit_shape(body_with(0))
+
+
+def test_grow_skips_frame_with_inherited_middle_anchor():
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    title = slide.shapes.title
+    assert prs.slide_master.placeholders[0].text_frame._txBody.bodyPr.get("anchor") == "ctr"
+    assert title.text_frame.vertical_anchor is None
+    title.text_frame.text = "A long title that wraps onto several lines in the title box " * 3
+    original_height = title.height
+
+    fit_slide(slide, grow=True, slide_height_emu=prs.slide_height)
+
+    assert title.height == original_height
+
+
+def test_insets_are_inherited_from_the_master():
+    def body_scale(master_inset_emu):
+        prs = Presentation()
+        master_body = prs.slide_master.placeholders[1]
+        for name in ("lIns", "rIns"):
+            master_body.text_frame._txBody.bodyPr.set(name, str(master_inset_emu))
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        body = slide.placeholders[1]
+        body.text_frame.text = "word " * 150
+        assert body.text_frame._txBody.bodyPr.get("lIns") is None
+        return fit_shape(body)
+
+    assert body_scale(Inches(3)) < body_scale(Inches(0.1))

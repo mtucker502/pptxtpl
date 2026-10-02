@@ -114,30 +114,76 @@ def _load_font(size_px: int, font_path: str | None):
         ) from exc
 
 
-def _inset_pt(text_frame, name: str) -> float:
-    """Return one text-frame inset in points, falling back to the PPT default."""
-    value = getattr(text_frame, f"margin_{name}")
+def _placeholder_chain(shape):
+    """Yield a shape, then the layout and master placeholders it inherits from.
+
+    Uses python-pptx's own resolution: a slide placeholder finds its layout
+    placeholder by ``idx``, and a layout placeholder finds its master
+    placeholder by (mapped) type. Non-placeholders yield only themselves.
+    """
+    current = shape
+    seen = 0
+    while current is not None and seen < 3:
+        yield current
+        seen += 1
+        try:
+            current = current._base_placeholder
+        except (AttributeError, KeyError, ValueError):
+            return
+
+
+def _body_pr_attr(shape, name: str) -> str | None:
+    """Read a ``<a:bodyPr>`` attribute through the placeholder chain."""
+    for source in _placeholder_chain(shape):
+        if not getattr(source, "has_text_frame", False):
+            continue
+        value = source.text_frame._txBody.bodyPr.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _inset_pt(shape, name: str) -> float:
+    """Return one text-frame inset in points, honouring layout/master values.
+
+    python-pptx's ``margin_*`` properties return the schema default when the
+    shape's own ``bodyPr`` omits the attribute, ignoring an inset set on the
+    layout or master placeholder.
+    """
+    value = _body_pr_attr(shape, f"{name[0]}Ins")
     if value is None:
         return _DEFAULT_INSET_PT[name[0]]
-    return Emu(value).pt
+    return Emu(int(value)).pt
 
 
-def _lvl1_size_from_list_style(element) -> float | None:
-    """Read lvl1pPr/defRPr@sz (in points) from an element's a:lstStyle."""
+def _inherited_anchor(shape):
+    """Resolve a text frame's vertical anchor through the placeholder chain."""
+    value = _body_pr_attr(shape, "anchor")
+    if value is None:
+        return MSO_ANCHOR.TOP
+    return MSO_ANCHOR.from_xml(value)
+
+
+def _lvl_size_from_list_style(element, level: int) -> float | None:
+    """Read ``lvl{n}pPr/defRPr@sz`` (in points) from an element's ``a:lstStyle``."""
     lst_style = element.find(qn("a:lstStyle"))
     if lst_style is None:
         return None
-    lvl1 = lst_style.find(qn("a:lvl1pPr"))
-    if lvl1 is None:
+    return _lvl_size_from_style(lst_style, level)
+
+
+def _lvl_size_from_style(style, level: int) -> float | None:
+    lvl = style.find(qn(f"a:lvl{level + 1}pPr"))
+    if lvl is None:
         return None
-    def_rpr = lvl1.find(qn("a:defRPr"))
+    def_rpr = lvl.find(qn("a:defRPr"))
     if def_rpr is None or def_rpr.get("sz") is None:
         return None
     return int(def_rpr.get("sz")) / 100
 
 
-def _lvl1_size_from_master_styles(master, ph_type) -> float | None:
-    """Read the master's titleStyle/bodyStyle/otherStyle level-1 size."""
+def _lvl_size_from_master_styles(master, ph_type, level: int) -> float | None:
+    """Read the master's titleStyle/bodyStyle/otherStyle size for a level."""
     tx_styles = master._element.find(qn("p:txStyles"))
     if tx_styles is None:
         return None
@@ -150,53 +196,37 @@ def _lvl1_size_from_master_styles(master, ph_type) -> float | None:
     style = tx_styles.find(qn(style_tag))
     if style is None:
         return None
-    lvl1 = style.find(qn("a:lvl1pPr"))
-    if lvl1 is None:
-        return None
-    def_rpr = lvl1.find(qn("a:defRPr"))
-    if def_rpr is None or def_rpr.get("sz") is None:
-        return None
-    return int(def_rpr.get("sz")) / 100
+    return _lvl_size_from_style(style, level)
 
 
-def _inherited_size_pt(shape, fallback: float) -> float:
-    """Resolve the effective level-1 font size for a shape.
+def _inherited_size_pt(shape, level: int, fallback: float) -> float:
+    """Resolve the effective font size for paragraphs at ``level`` in a shape.
 
-    Checks, in order: the shape's own list style, the matching layout
-    placeholder, the matching master placeholder, and the master text styles.
+    Checks, in order: the shape's own list style, the layout placeholder it
+    inherits from, that placeholder's master placeholder, and the master text
+    styles. Levels above the first fall back to level 1 before ``fallback``.
     """
-    own = _lvl1_size_from_list_style(shape.text_frame._txBody)
-    if own:
-        return own
-
-    if not shape.is_placeholder:
-        return fallback
-
-    try:
-        idx = shape.placeholder_format.idx
-        ph_type = shape.placeholder_format.type
-    except (AttributeError, ValueError):
-        return fallback
-
-    layout = getattr(shape.part, "slide_layout", None)
-    master = getattr(layout, "slide_master", None)
-
-    for source in (layout, master):
-        if source is None:
+    for source in _placeholder_chain(shape):
+        if not getattr(source, "has_text_frame", False):
             continue
-        for candidate in source.placeholders:
-            fmt = candidate.placeholder_format
-            if fmt.idx != idx and fmt.type != ph_type:
-                continue
-            size = _lvl1_size_from_list_style(candidate.text_frame._txBody)
-            if size:
-                return size
-
-    if master is not None:
-        size = _lvl1_size_from_master_styles(master, ph_type)
+        size = _lvl_size_from_list_style(source.text_frame._txBody, level)
         if size:
             return size
 
+    if shape.is_placeholder:
+        try:
+            ph_type = shape.placeholder_format.type
+        except (AttributeError, ValueError):
+            ph_type = None
+        layout = getattr(shape.part, "slide_layout", None)
+        master = getattr(layout, "slide_master", None)
+        if master is not None:
+            size = _lvl_size_from_master_styles(master, ph_type, level)
+            if size:
+                return size
+
+    if level > 0:
+        return _inherited_size_pt(shape, 0, fallback)
     return fallback
 
 
@@ -268,9 +298,12 @@ def _wrapped_segment_count(
 
 
 def _layout(
-    text_frame, scale: float, default_pt: float, width_pt: float, font_path: str | None
+    text_frame, scale: float, level_size, width_pt: float, font_path: str | None
 ) -> tuple[float, int]:
     """Lay a text frame out at a font scale.
+
+    Args:
+        level_size: Callable mapping a paragraph level to its inherited size.
 
     Returns:
         ``(total_height_pt, total_line_count)``.
@@ -279,7 +312,7 @@ def _layout(
     line_count = 0
     wrap = text_frame.word_wrap is not False
     for paragraph in text_frame.paragraphs:
-        size_pt = _paragraph_size_pt(paragraph, default_pt) * scale
+        size_pt = _paragraph_size_pt(paragraph, level_size(paragraph.level)) * scale
         size_px = max(int(round(size_pt)), 1)
         lines = _wrapped_line_count(paragraph.text, size_px, font_path, width_pt, wrap)
         line_count += lines
@@ -303,7 +336,7 @@ def _layout(
 def _fits(
     text_frame,
     scale: float,
-    default_pt: float,
+    level_size,
     width_pt: float,
     height_pt: float,
     font_path: str | None,
@@ -316,7 +349,7 @@ def _fits(
     PowerPoint leaves it alone. Shrinking those would be wrong -- the overflow
     worth fixing is text wrapping onto more lines than the shape can show.
     """
-    required, lines = _layout(text_frame, scale, default_pt, width_pt, font_path)
+    required, lines = _layout(text_frame, scale, level_size, width_pt, font_path)
     return lines <= 1 or required <= height_pt
 
 
@@ -379,21 +412,26 @@ def _measure_scale(
     if not text_frame.text.strip():
         return None
 
-    width_pt = Emu(shape.width).pt - _inset_pt(text_frame, "left") - _inset_pt(text_frame, "right")
-    height_pt = Emu(shape.height).pt - _inset_pt(text_frame, "top") - _inset_pt(text_frame, "bottom")
+    width_pt = Emu(shape.width).pt - _inset_pt(shape, "left") - _inset_pt(shape, "right")
+    height_pt = Emu(shape.height).pt - _inset_pt(shape, "top") - _inset_pt(shape, "bottom")
     if width_pt <= 0 or height_pt <= 0:
         return None
     width_pt *= _WIDTH_SAFETY
 
-    default_pt = _inherited_size_pt(shape, default_size_pt)
+    level_sizes: dict[int, float] = {}
 
-    if _fits(text_frame, 1.0, default_pt, width_pt, height_pt, font_path):
+    def level_size(level: int) -> float:
+        if level not in level_sizes:
+            level_sizes[level] = _inherited_size_pt(shape, level, default_size_pt)
+        return level_sizes[level]
+
+    if _fits(text_frame, 1.0, level_size, width_pt, height_pt, font_path):
         return 1.0
 
     low, high = min_scale, 1.0
     for _ in range(12):
         mid = (low + high) / 2
-        if _fits(text_frame, mid, default_pt, width_pt, height_pt, font_path):
+        if _fits(text_frame, mid, level_size, width_pt, height_pt, font_path):
             low = mid
         else:
             high = mid
@@ -494,8 +532,10 @@ def _grow_to_fit(shape, siblings, slide_height_emu: int, options: dict) -> None:
     """
     if not shape.has_text_frame:
         return
-    # Growing a middle- or bottom-anchored frame would move its text.
-    if shape.text_frame.vertical_anchor not in (None, MSO_ANCHOR.TOP):
+    # Growing a middle- or bottom-anchored frame would move its text. The
+    # anchor is almost always inherited from the layout or master, so the
+    # shape's own bodyPr is not enough to decide.
+    if _inherited_anchor(shape) != MSO_ANCHOR.TOP:
         return
 
     before = _measure_scale(shape, **options)
