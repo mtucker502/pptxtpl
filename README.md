@@ -19,6 +19,14 @@ Jinja2 templating for PowerPoint `.pptx` files. Like [docxtpl](https://github.co
 uv add git+https://github.com/mtucker502/pptxtpl.git
 ```
 
+Optional extras:
+
+```bash
+uv add "pptxtpl[autofit] @ git+https://github.com/mtucker502/pptxtpl.git"
+```
+
+`autofit` pins Pillow >= 10.1, whose bundled font is used to measure text so overflowing shapes can be shrunk to fit. python-pptx already depends on Pillow, so the extra only enforces the minimum version. See [Autofit](#autofit-shrink-text-on-overflow).
+
 ## Quick start
 
 Create a `.pptx` template in PowerPoint (or with python-pptx) containing Jinja2 tags in text boxes, tables, or shapes. Then render it:
@@ -337,6 +345,64 @@ tpl.render({"show_detail": False, ...})
 The `{%tc %}` prefix elevates the Jinja tag to the `<a:tc>` (table cell) XML level. The cells containing the `{%tc %}` tags themselves are replaced by the bare Jinja directive, while the cells between them are conditionally included in the output.
 
 **Note:** PowerPoint defines column widths in a fixed grid (`<a:tblGrid>`), so removing cells may affect the table layout. You may need to adjust column widths or use a merged cell to accommodate the conditional content.
+
+## Autofit (shrink text on overflow)
+
+Rendered text is usually longer than the placeholder text it replaced, so it overflows its shape. PowerPoint's "Shrink text on overflow" does not fix this on its own: the shrink factor is *stored in the file* as `<a:normAutofit fontScale="..."/>`, and PowerPoint only recalculates it when the text is edited in the UI. A generated deck therefore overflows until you click into the box and press a key.
+
+Pass `autofit=True` to compute and store that factor at save time:
+
+```bash
+pip install "pptxtpl[autofit]"     # Pillow >= 10.1, used for text measurement
+```
+
+```python
+tpl = PptxTemplate("template.pptx")
+tpl.render(context)
+tpl.save("output.pptx", autofit=True)
+```
+
+Each text frame is measured, a scale is found by binary search, and `<a:normAutofit>` is written with the result. Footer, slide-number, date, and header placeholders are skipped, since the master controls them.
+
+### Keeping text proportional
+
+By default each shape is scaled on its own, so a cramped title can end up much smaller than the body beneath it. Two options address that:
+
+```python
+tpl.save("output.pptx", autofit=True, grow=True, uniform=True)
+```
+
+`grow=True` lets a shape expand downward into empty space *before* any shrinking, so a tight box is not what forces the font down. A long title in a 33pt frame with 20pt of clear space under it keeps a much larger font this way. Only top-anchored frames are moved (the anchor is resolved through the layout and master), a shape never grows past whatever sits below it on the slide, layout, or master, a 0.25in bottom margin is kept, and the new height is kept only if it actually buys a larger font. Shapes inside groups are shrunk but never grown.
+
+`uniform=True` scales every shape on a slide by the same factor — the smallest any one of them needs — so title and body keep their relative sizes.
+
+They compose: `grow` raises the worst-case shape, and `uniform` then levels the slide at that higher factor.
+
+Options are forwarded to `fit_shape`:
+
+```python
+tpl.save(
+    "output.pptx",
+    autofit=True,
+    font_path="/path/to/Metric-Regular.ttf",  # measure with the deck's real font
+    default_size_pt=18.0,                     # assumed when nothing declares a size
+    min_scale=0.25,                           # PowerPoint's own floor
+)
+```
+
+Measurement uses Pillow's bundled font unless `font_path` is given. That is accurate enough for a scale factor, but passing the deck's actual font is better when a shape is close to the boundary.
+
+It can also be used directly on a `python-pptx` presentation:
+
+```python
+from pptx import Presentation
+from pptxtpl import fit_presentation
+
+prs = Presentation("deck.pptx")
+for result in fit_presentation(prs):
+    print(result.slide_index, result.shape_name, result.font_scale)
+prs.save("deck.pptx")
+```
 
 ## Inspecting templates
 

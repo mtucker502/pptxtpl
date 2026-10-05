@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pptxtpl"
-version = "0.3.0"
+version = "0.4.0"
 description = "Jinja2 templating for PowerPoint .pptx files"
 readme = "README.md"
 license = "MIT"
@@ -13,6 +13,11 @@ dependencies = [
     "python-pptx",
     "Jinja2",
     "lxml",
+]
+
+[project.optional-dependencies]
+autofit = [
+    "pillow>=10.1",
 ]
 
 [tool.pytest.ini_options]
